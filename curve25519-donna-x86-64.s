@@ -16,7 +16,7 @@
 ################################################################################
 .text
 
-.extern fmonty
+; .extern fmonty
 
 .globl fmul
 .globl fsquare
@@ -860,7 +860,7 @@ add %r9,%rsi
 add %r8,%rdx
 add %r9,%rcx
 mov %r14,%r8
-call fmonty
+call fmonty@plt
 
 xor $256,%r12
 

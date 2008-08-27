@@ -4,6 +4,12 @@
 #include <stdint.h>
 #include <sys/uio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define PUBLIC __attribute__((visibility("default")))
+
 // -----------------------------------------------------------------------------
 // struct obstcp_keypair - a public/private key pair
 // keyid: the 32-bit xor folding of the public key
@@ -23,7 +29,7 @@ struct obstcp_keys {
 // Setup a keyset structure. This must be called before any other operations
 // on the keyset.
 // -----------------------------------------------------------------------------
-void obstcp_keys_init(struct obstcp_keys *keys);
+extern void PUBLIC obstcp_keys_init(struct obstcp_keys *keys);
 // -----------------------------------------------------------------------------
 // Calculate the public key from a private key and prepend the key pair to the
 // list of keys installed in the keyset. This becomes the default key
@@ -32,11 +38,12 @@ void obstcp_keys_init(struct obstcp_keys *keys);
 //   ENOMEM: out of memory
 //   ENOSPC: a key with the same keyid is already in the keyset
 // -----------------------------------------------------------------------------
-int obstcp_keys_key_add(struct obstcp_keys *keys, const uint8_t *private_key);
+extern int PUBLIC obstcp_keys_key_add(struct obstcp_keys *keys,
+                                      const uint8_t *private_key);
 // -----------------------------------------------------------------------------
 // Free all keys contained in the keyset
 // -----------------------------------------------------------------------------
-void obstcp_keys_free(struct obstcp_keys *keys);
+extern void PUBLIC obstcp_keys_free(struct obstcp_keys *keys);
 
 // -----------------------------------------------------------------------------
 // Keys for the variable arguments part of obstcp_advert_create and
@@ -69,8 +76,8 @@ enum {
 //   EINVAL: an unknown or invalid pair was found in the arguments
 //   ENOKEY: no default key was found in the keyset
 // -----------------------------------------------------------------------------
-int obstcp_advert_create(char *output, unsigned length,
-                         const struct obstcp_keys *keys, ...);
+int PUBLIC obstcp_advert_create(char *output, unsigned length,
+                                const struct obstcp_keys *keys, ...);
 
 // -----------------------------------------------------------------------------
 // Parse a base64 encoded obstcp "advert". This can be used to extract the
@@ -91,7 +98,7 @@ int obstcp_advert_create(char *output, unsigned length,
 // length: the number of bytes in @input (not inc \n etc)
 // returns: 1 on success, 0 on parse error.
 // -----------------------------------------------------------------------------
-int obstcp_advert_parse(const char *input, unsigned length, ...);
+int PUBLIC obstcp_advert_parse(const char *input, unsigned length, ...);
 
 // -----------------------------------------------------------------------------
 // This is the crypto context for a given direction of data
@@ -131,8 +138,8 @@ struct obstcp_server_ctx {
 // Setup a context structure. This must be called before any other operations
 // on the context struture.
 // -----------------------------------------------------------------------------
-void obstcp_server_ctx_init(struct obstcp_server_ctx *ctx,
-                            const struct obstcp_keys *keys);
+void PUBLIC obstcp_server_ctx_init(struct obstcp_server_ctx *ctx,
+                                   const struct obstcp_keys *keys);
 
 // -----------------------------------------------------------------------------
 // Read from a socket
@@ -167,13 +174,13 @@ void obstcp_server_ctx_init(struct obstcp_server_ctx *ctx,
 // If you wish to know if key agreement has completed after calling this
 // function, use obstcp_server_ready.
 // -----------------------------------------------------------------------------
-ssize_t obstcp_server_read(int fd, struct obstcp_server_ctx *ctx,
-                           uint8_t *buffer, size_t len, char *ready);
+ssize_t PUBLIC obstcp_server_read(int fd, struct obstcp_server_ctx *ctx,
+                                  uint8_t *buffer, size_t len, char *ready);
 
 // -----------------------------------------------------------------------------
 // Returns true iff key agreement has completed.
 // -----------------------------------------------------------------------------
-int obstcp_server_ready(const struct obstcp_server_ctx *ctx);
+int PUBLIC obstcp_server_ready(const struct obstcp_server_ctx *ctx);
 
 // -----------------------------------------------------------------------------
 // Write examples:
@@ -225,9 +232,9 @@ int obstcp_server_ready(const struct obstcp_server_ctx *ctx);
 // Before writing anything to a socket you must call obstcp_server_ends to get
 // the prepended and appended data for the frame.
 // -----------------------------------------------------------------------------
-ssize_t obstcp_server_encrypt(struct obstcp_server_ctx *ctx,
-                              uint8_t *output, const uint8_t *buffer, size_t len,
-                              char frame_accum);
+ssize_t PUBLIC obstcp_server_encrypt(struct obstcp_server_ctx *ctx,
+                                     uint8_t *output, const uint8_t *buffer, size_t len,
+                                    char frame_accum);
 
 // -----------------------------------------------------------------------------
 // The protocol may need to prepend and append data to a frame. Call this
@@ -244,8 +251,8 @@ ssize_t obstcp_server_encrypt(struct obstcp_server_ctx *ctx,
 // return 0. It's worth detecting this and falling back to a simple write()
 // rather than a writev() in this case.
 // -----------------------------------------------------------------------------
-int obstcp_server_ends(struct obstcp_server_ctx *ctx, struct iovec *start,
-                       struct iovec *end);
+int PUBLIC obstcp_server_ends(struct obstcp_server_ctx *ctx, struct iovec *start,
+                              struct iovec *end);
 
 // -----------------------------------------------------------------------------
 
@@ -277,9 +284,9 @@ struct obstcp_client_ctx {
 // Obviously, the advert can fail to parse, in which case errno is set to
 // EINVAL.
 // -----------------------------------------------------------------------------
-int obstcp_client_ctx_init(struct obstcp_client_ctx *ctx, struct obstcp_keys *keys,
-                           const char *advert, unsigned len,
-                           const uint8_t *random);
+int PUBLIC obstcp_client_ctx_init(struct obstcp_client_ctx *ctx, struct obstcp_keys *keys,
+                                  const char *advert, unsigned len,
+                                  const uint8_t *random);
 
 // -----------------------------------------------------------------------------
 // After connecting the socket you must call this function to get the banner
@@ -288,28 +295,39 @@ int obstcp_client_ctx_init(struct obstcp_client_ctx *ctx, struct obstcp_keys *ke
 // the iovec must be completed enqueued to the kernel's socket buffer before
 // doing anything else with this context object.
 // -----------------------------------------------------------------------------
-void obstcp_client_banner(struct obstcp_client_ctx *ctx,
-                          struct iovec *out);
+void PUBLIC obstcp_client_banner(struct obstcp_client_ctx *ctx,
+                                 struct iovec *out);
 
 // -----------------------------------------------------------------------------
 // Same as the server version
 // -----------------------------------------------------------------------------
-ssize_t obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
-                           uint8_t *buffer, size_t len, char *ready);
+ssize_t PUBLIC obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
+                                  uint8_t *buffer, size_t len, char *ready);
+
+// -----------------------------------------------------------------------------
+// FIXME: document
+// -----------------------------------------------------------------------------
+ssize_t PUBLIC obstcp_client_in(struct obstcp_client_ctx *ctx,
+                 uint8_t *buffer, size_t blen, char *ready,
+                 ssize_t (*read) (void *, void *buffer, size_t len), void *ptr);
 
 // -----------------------------------------------------------------------------
 // Same as the server version
 // -----------------------------------------------------------------------------
-ssize_t obstcp_client_encrypt(struct obstcp_client_ctx *ctx,
-                              uint8_t *output, const uint8_t *buffer, size_t len,
-                              char frame_accum);
+ssize_t PUBLIC obstcp_client_encrypt(struct obstcp_client_ctx *ctx,
+                                     uint8_t *output, const uint8_t *buffer, size_t len,
+                                     char frame_accum);
 
 // -----------------------------------------------------------------------------
 // Same as the server version
 // -----------------------------------------------------------------------------
-int obstcp_client_ends(struct obstcp_client_ctx *ctx, struct iovec *start,
-                       struct iovec *end);
+int PUBLIC obstcp_client_ends(struct obstcp_client_ctx *ctx, struct iovec *start,
+                              struct iovec *end);
 
 // -----------------------------------------------------------------------------
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  // LIBOBSTCP_H

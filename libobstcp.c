@@ -5,6 +5,8 @@
 #include <string.h>
 #include <errno.h>
 
+#include <stdio.h>   // DEBUG ONLY
+
 #include <arpa/inet.h>
 
 #include "libobstcp.h"
@@ -21,6 +23,15 @@
 
 extern void curve25519_donna(uint8_t *mypublic, const uint8_t *secret,
                              const uint8_t *basepoint);
+
+static void
+print_bytes(const uint8_t *bytes, unsigned len) {
+  unsigned i;
+
+  for (i = 0; i < len; ++i) {
+    fprintf(stderr, "%02x", bytes[i]);
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Utility functions for reading and writing the banners and adverts...
@@ -58,8 +69,7 @@ varint_get(uint32_t *v, const uint8_t *banner, unsigned length, unsigned *j) {
     accum <<= 7;
     accum += banner[*j] & 0x7f;
     bytes++;
-    (*j)++;
-  } while (bytes < 4 && banner[*j] & 0x80);
+  } while (bytes < 4 && banner[(*j)++] & 0x80);
 
   *v = accum;
   return 1;
@@ -91,7 +101,6 @@ obstcp_advert_create(char *output, unsigned length,
   if (!varint_put(advert, sizeof(advert), &j, OBSTCP_KIND_PUBLIC << 1 | 1)) goto spc;
   if (!varint_put(advert, sizeof(advert), &j, 32)) goto spc;
   if (!buffer_put(advert, sizeof(advert), &j, keys->keys->public_key, 32)) goto spc;
-  j += 32;
 
   for (;;) {
     const int type = va_arg(ap, int);
@@ -151,12 +160,12 @@ obstcp_advert_parse(const char *input, unsigned length, ...) {
 
   for (;;) {
     if (j == len) break;
-    if (varint_get(&type, advert, len, &j)) return 0;
+    if (!varint_get(&type, advert, len, &j)) return 0;
     switch (type >> 1) {
     case OBSTCP_KIND_OBSPORT:
     case OBSTCP_KIND_TLSPORT:
       if (!(type & 1)) return 0;
-      if (varint_get(&v, advert, len, &j)) return 0;
+      if (!varint_get(&v, advert, len, &j)) return 0;
       if (v != 2) return 0;
       if (j + 2 > len) return 0;
       memcpy(&port, advert + j, 2);
@@ -167,9 +176,10 @@ obstcp_advert_parse(const char *input, unsigned length, ...) {
       } else {
         tlsport = port;
       }
+      break;
     default:
       if (type & 1) {
-        if (varint_get(&v, advert, len, &j)) return 0;
+        if (!varint_get(&v, advert, len, &j)) return 0;
         if (j + v > len) return 0;
         j += v;
       }
@@ -374,7 +384,7 @@ client_banner_parse(const uint8_t *banner, unsigned len,
       if (!varint_get(&v, banner, len, &j)) return 0;
       if (v != 4) return 0;
       if (j + v > len) return 0;
-      *keyid = ntohl(*((uint32_t *) banner + j));
+      *keyid = ntohl(*((uint32_t *) (banner + j)));
       keyid_found = 1;
       j += 4;
       break;
@@ -401,10 +411,6 @@ server_setup(struct obstcp_server_ctx *ctx, const uint8_t *shared,
   uint8_t in_key[32], out_key[32];
   struct sha256_ctx sha;
 
-  ctx->state = SRV_ST_FIRST_FRAME;
-  memset(&ctx->u.b.in, 0, sizeof(struct obstcp_half_connection));
-  memset(&ctx->u.b.out, 0, sizeof(struct obstcp_half_connection));
-
   sha256_init(&sha);
   sha256_update(&sha, shared, 32);
   sha256_update(&sha, random, 16);
@@ -415,6 +421,10 @@ server_setup(struct obstcp_server_ctx *ctx, const uint8_t *shared,
   sha256_update(&sha, in_key, 32);
   sha256_final(&sha, out_key);
 
+  ctx->state = SRV_ST_FIRST_FRAME;
+  memset(&ctx->u.b.in, 0, sizeof(struct obstcp_half_connection));
+  memset(&ctx->u.b.out, 0, sizeof(struct obstcp_half_connection));
+
   ECRYPT_keysetup(ctx->u.b.in.input, in_key, 256, 0);
   ECRYPT_keysetup(ctx->u.b.out.input, out_key, 256, 0);
 
@@ -424,7 +434,7 @@ server_setup(struct obstcp_server_ctx *ctx, const uint8_t *shared,
 
 ssize_t EXPORTED
 obstcp_server_read(int fd, struct obstcp_server_ctx *ctx,
-                   uint8_t *buffer, size_t len, char *ready) {
+                   uint8_t *buffer, size_t blen, char *ready) {
   ssize_t n;
 
   if (ctx->state == SRV_ST_READING) {
@@ -465,9 +475,9 @@ obstcp_server_read(int fd, struct obstcp_server_ctx *ctx,
           return -1;
         }
 
-        curve25519_donna(shared, theirpublic, secret);
+        curve25519_donna(shared, secret, theirpublic);
         server_setup(ctx, shared, nonce);
-        return obstcp_server_read(fd, ctx, buffer, len, ready);
+        return obstcp_server_read(fd, ctx, buffer, blen, ready);
       } else {
         errno = EAGAIN;
         return -1;
@@ -480,7 +490,7 @@ obstcp_server_read(int fd, struct obstcp_server_ctx *ctx,
       if (n < 1) return n;
       ctx->u.a.read += n;
       if (ctx->u.a.read == 2) {
-        return obstcp_server_read(fd, ctx, buffer, len, ready);
+        return obstcp_server_read(fd, ctx, buffer, blen, ready);
       } else {
         errno = EAGAIN;
         return -1;
@@ -488,7 +498,7 @@ obstcp_server_read(int fd, struct obstcp_server_ctx *ctx,
     }
   } else {
     do {
-      n = read(fd, buffer, len);
+      n = read(fd, buffer, blen);
     } while (n == -1 && errno == EINTR);
 
     if (n < 1) return n;
@@ -525,11 +535,14 @@ obstcp_server_ends(struct obstcp_server_ctx *ctx,
 
   if (!ctx->frame_valid || ctx->frame_open) return -1;
 
+  end->iov_len = 0;
+
   if (ctx->state == SRV_ST_FIRST_FRAME) {
     start->iov_base = (void *) banner;
     start->iov_len = 2;
     return 1;
   } else {
+    start->iov_len = 0;
     return 0;
   }
 }
@@ -584,19 +597,19 @@ static unsigned
 client_write_banner(uint8_t *banner, unsigned len, const struct obstcp_keypair *kp,
                     const uint8_t *random, const uint8_t *serverpublic) {
   unsigned j = 2;
-  const uint32_t keyid = key_keyid(serverpublic);
+  const uint32_t keyid = htonl(key_keyid(serverpublic));
 
-  if (varint_put(banner, len, &j, OBSTCP_KIND_PUBLIC << 1 | 1)) goto spc;
-  if (varint_put(banner, len, &j, 32)) goto spc;
-  if (buffer_put(banner, len, &j, kp->public_key, 32)) goto spc;
+  if (!varint_put(banner, len, &j, OBSTCP_KIND_PUBLIC << 1 | 1)) goto spc;
+  if (!varint_put(banner, len, &j, 32)) goto spc;
+  if (!buffer_put(banner, len, &j, kp->public_key, 32)) goto spc;
 
-  if (varint_put(banner, len, &j, OBSTCP_KIND_NONCE << 1 | 1)) goto spc;
-  if (varint_put(banner, len, &j, 16)) goto spc;
-  if (buffer_put(banner, len, &j, random, 16)) goto spc;
+  if (!varint_put(banner, len, &j, OBSTCP_KIND_NONCE << 1 | 1)) goto spc;
+  if (!varint_put(banner, len, &j, 16)) goto spc;
+  if (!buffer_put(banner, len, &j, random, 16)) goto spc;
 
-  if (varint_put(banner, len, &j, OBSTCP_KIND_KEYID << 1 | 1)) goto spc;
-  if (varint_put(banner, len, &j, 4)) goto spc;
-  if (buffer_put(banner, len, &j, &keyid, 4)) goto spc;
+  if (!varint_put(banner, len, &j, OBSTCP_KIND_KEYID << 1 | 1)) goto spc;
+  if (!varint_put(banner, len, &j, 4)) goto spc;
+  if (!buffer_put(banner, len, &j, &keyid, 4)) goto spc;
 
   const uint16_t blen = j - 2;
   const uint16_t blen_be = htons(blen);
@@ -637,17 +650,18 @@ obstcp_client_ctx_init(struct obstcp_client_ctx *ctx, struct obstcp_keys *keys,
   sha256_update(&sha, out_key, 32);
   sha256_final(&sha, in_key);
 
+  memset(ctx, 0, sizeof(struct obstcp_client_ctx));
+
   ECRYPT_keysetup(ctx->in.input, in_key, 256, 0);
   ECRYPT_keysetup(ctx->out.input, out_key, 256, 0);
 
   ctx->in.used = 64;
   ctx->out.used = 64;
 
+  ctx->state = CLI_ST_WRITING;
+
   ctx->n = client_write_banner(ctx->buffer, sizeof(ctx->buffer),
                                keys->keys, random, serverpublic);
-
-  memset(ctx, 0, sizeof(struct obstcp_client_ctx));
-  ctx->state = CLI_ST_WRITING;
 
   return 1;
 }
@@ -658,13 +672,15 @@ obstcp_client_banner(struct obstcp_client_ctx *ctx,
   if (ctx->state != CLI_ST_WRITING) abort();
   out->iov_base = (void *) ctx->buffer;
   out->iov_len = ctx->n;
+  ctx->n = 0;
 
   ctx->state = CLI_ST_READING;
 }
 
 ssize_t EXPORTED
-obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
-                   uint8_t *buffer, size_t len, char *ready) {
+obstcp_client_in(struct obstcp_client_ctx *ctx,
+                 uint8_t *buffer, size_t blen, char *ready,
+                 ssize_t (*read) (void *, void *buffer, size_t len), void *ptr) {
   ssize_t n;
 
   if (ctx->state == CLI_ST_WRITING) {
@@ -686,30 +702,32 @@ obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
 
       len += 2;  // for the length bytes
 
-      do {
-        n = read(fd, ctx->buffer + ctx->n, len - ctx->n);
-      } while (n == -1 && errno == EINTR);
+      if (ctx->n < len) {
+        do {
+          n = read(ptr, ctx->buffer + ctx->n, len - ctx->n);
+        } while (n == -1 && errno == EINTR);
 
-      if (n < 1) return n;
-      ctx->n += n;
+        if (n < 1) return n;
+        ctx->n += n;
+      }
 
       if (ctx->n == len) {
         // we ignore the server's banner for now
         ctx->state = CLI_ST_RUNNING;
-        return obstcp_client_read(fd, ctx, buffer, len, ready);
+        return obstcp_client_in(ctx, buffer, blen, ready, read, ptr);
       } else {
         errno = EAGAIN;
         return -1;
       }
     } else {
       do {
-        n = read(fd, ctx->buffer + ctx->n, 2 - ctx->n);
+        n = read(ptr, ctx->buffer + ctx->n, 2 - ctx->n);
       } while (n == -1 && errno == EINTR);
 
       if (n < 1) return n;
       ctx->n += n;
       if (ctx->n == 2) {
-        return obstcp_client_read(fd, ctx, buffer, len, ready);
+        return obstcp_client_in(ctx, buffer, blen, ready, read, ptr);
       } else {
         errno = EAGAIN;
         return -1;
@@ -717,7 +735,7 @@ obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
     }
   } else {
     do {
-      n = read(fd, buffer, len);
+      n = read(ptr, buffer, blen);
     } while (n == -1 && errno == EINTR);
 
     if (n < 1) return n;
@@ -725,6 +743,19 @@ obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
     *ready = 1;
     return n;
   }
+}
+
+static ssize_t
+read_wrapper(void *fdptr, void *buffer, size_t len) {
+  int fd = (intptr_t) fdptr;
+  return read(fd, buffer, len);
+}
+
+ssize_t PUBLIC
+obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
+                   uint8_t *buffer, size_t len, char *ready) {
+  intptr_t fdptr = (intptr_t) fd;
+  obstcp_client_in(ctx, buffer, len, ready, read_wrapper, (void *) fdptr);
 }
 
 ssize_t EXPORTED
@@ -741,5 +772,7 @@ int EXPORTED
 obstcp_client_ends(struct obstcp_client_ctx *ctx, struct iovec *start,
                    struct iovec *end) {
   if (ctx->frame_open) return -1;
+  start->iov_len = 0;
+  end->iov_len = 0;
   return 0;
 }
