@@ -11,6 +11,7 @@ extern "C" {
 #define PUBLIC __attribute__((visibility("default")))
 
 #define OBSTCP_MAX_PREFIX 64
+#define OBSTCP_ACCUM_BUFFERS 6
 
 // -----------------------------------------------------------------------------
 // struct obstcp_keypair - a public/private key pair
@@ -252,6 +253,13 @@ ssize_t PUBLIC obstcp_server_encrypt(struct obstcp_server_ctx *ctx,
 int PUBLIC obstcp_server_prefix(struct obstcp_server_ctx *ctx, struct iovec *prefix);
 
 // -----------------------------------------------------------------------------
+// Return the maximum number of bytes in a single frame. This will always
+// be < 2**16. If the current context doesn't have framing configured, the
+// result will be 2**16 - 1.
+// -----------------------------------------------------------------------------
+unsigned PUBLIC obstcp_server_frame_payload_sz(const struct obstcp_server_ctx *ctx);
+
+// -----------------------------------------------------------------------------
 
 
 
@@ -320,6 +328,11 @@ ssize_t PUBLIC obstcp_client_encrypt(struct obstcp_client_ctx *ctx,
 int PUBLIC obstcp_client_prefix(struct obstcp_client_ctx *ctx, struct iovec *prefix);
 
 // -----------------------------------------------------------------------------
+// Same as the server version
+// -----------------------------------------------------------------------------
+unsigned PUBLIC obstcp_client_frame_payload_sz(const struct obstcp_client_ctx *ctx);
+
+// -----------------------------------------------------------------------------
 
 
 // -----------------------------------------------------------------------------
@@ -339,9 +352,8 @@ struct obstcp_accum_buffer {
 
 struct obstcp_accum {
   void *ctx;
-  uint16_t head;
   uint16_t frame_size;
-  struct obstcp_accum_buffer buffers[6];
+  struct obstcp_accum_buffer buffers[OBSTCP_ACCUM_BUFFERS];
   uint8_t free_head, data_head, data_tail, is_server;
 };
 
@@ -389,13 +401,16 @@ void PUBLIC obstcp_accum_prepare(struct obstcp_accum *ac,
 // much application level data has been enqueued.
 //
 // ac: a valid accum_buffer structure, on which _prepare has just been called
-// result: the number of bytes that the kernel enqueued
-// iovecs: (output) the number of input iovecs enqueued
-// remainder: (output) the number of bytes in the remaining iovec which have
-//   been enqueued
+// result: the number of bytes of data that the kernel enqueued.
+// returns: the number of bytes of application level data that the kernel
+//   enqueued.
+//
+// If @result < 0 then this function returns -1 and sets errno to EINVAL. You
+// should check for errors from the writev before calling this function. If
+// @result is greater than the number of bytes in the output iovecs from
+// _prepare, the same thing happens.
 // -----------------------------------------------------------------------------
-int PUBLIC obstcp_accum_commit(struct obstcp_accum *ac, size_t result,
-                               unsigned *iovecs, size_t *remainder);
+ssize_t PUBLIC obstcp_accum_commit(struct obstcp_accum *ac, ssize_t result);
 
 #ifdef __cplusplus
 }

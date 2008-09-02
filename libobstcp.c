@@ -536,11 +536,17 @@ obstcp_server_prefix(struct obstcp_server_ctx *ctx, struct iovec *prefix) {
   if (ctx->state == SRV_ST_FIRST_FRAME) {
     prefix->iov_base = (void *) banner;
     prefix->iov_len = 2;
+    ctx->state = SRV_ST_2ND_FRAME_PENDING;
     return 1;
   } else {
     prefix->iov_len = 0;
     return 0;
   }
+}
+
+unsigned EXPORTED
+obstcp_server_frame_payload_sz(const struct obstcp_server_ctx *ctx) {
+  return 65535;
 }
 // -----------------------------------------------------------------------------
 
@@ -768,12 +774,42 @@ obstcp_client_prefix(struct obstcp_client_ctx *ctx, struct iovec *prefix) {
   return 0;
 }
 
+unsigned EXPORTED
+obstcp_client_frame_payload_sz(const struct obstcp_client_ctx *ctx) {
+  return 65535;
+}
 
 // -----------------------------------------------------------------------------
 
-void EXPORTED
+static void
 obstcp_accum_init(struct obstcp_accum *ac) {
-  ac->head = 0xffff;
+  unsigned i;
+
+  memset(ac, 0, sizeof(struct obstcp_accum));
+
+  for (i = 0; i < OBSTCP_ACCUM_BUFFERS - 1; ++i) {
+    ac->buffers[i].next = i + 1;
+  }
+  ac->buffers[OBSTCP_ACCUM_BUFFERS - 1].next = 0xff;
+
+  ac->free_head = 0;
+  ac->data_head = ac->data_tail = 0xff;
+}
+
+void EXPORTED
+obstcp_client_accum_init(struct obstcp_accum *ac, struct obstcp_client_ctx *ctx) {
+  obstcp_accum_init(ac);
+  ac->is_server = 0;
+  ac->frame_size = obstcp_client_frame_payload_sz(ctx);
+  ac->ctx = ctx;
+}
+
+void EXPORTED
+obstcp_server_accum_init(struct obstcp_accum *ac, struct obstcp_server_ctx *ctx) {
+  obstcp_accum_init(ac);
+  ac->is_server = 1;
+  ac->frame_size = obstcp_server_frame_payload_sz(ctx);
+  ac->ctx = ctx;
 }
 
 struct iovec_cursor {
@@ -846,7 +882,7 @@ obstcp_accum_prepare(struct obstcp_accum *ac,
                      struct iovec *out, unsigned *onumout,
                      const struct iovec *in, unsigned numin) {
   const unsigned numout = *onumout;
-  struct iovec_cursor outc, inc;
+  struct iovec_cursor outc, inc, inccopy;
   struct obstcp_accum_buffer *ab = NULL;
   uint8_t c;
 
@@ -875,6 +911,9 @@ obstcp_accum_prepare(struct obstcp_accum *ac,
   while (ac->free_head != 0xff && !iovec_cursor_full(&inc)) {
     unsigned frame_remaining = ac->frame_size;
     struct iovec iov, iniov;
+
+    // save the current cursor so that we can copy from it later
+    memcpy(&inccopy, &inc, sizeof(inc));
 
     // try to fill up a whole frame
     while (frame_remaining && !iovec_cursor_full(&inc)) {
@@ -919,7 +958,7 @@ obstcp_accum_prepare(struct obstcp_accum *ac,
       iovec_cursor_append(&outc, ab->prefix, ab->prefix_len);
     }
     if (!iovec_cursor_full(&outc)) {
-      iovec_cursor_append(&outc, iov.iov_base, iov.iov_len);
+      iovec_cursor_copy(&outc, &inccopy, ab->payload_len);
     }
   }
 
@@ -928,19 +967,24 @@ obstcp_accum_prepare(struct obstcp_accum *ac,
   return;
 }
 
-int EXPORTED
-obstcp_accum_commit(struct obstcp_accum *ac, size_t bytes,
-                    unsigned *oiovecs, size_t *oremainder) {
+ssize_t EXPORTED
+obstcp_accum_commit(struct obstcp_accum *ac, ssize_t bytes) {
   struct obstcp_accum_buffer *ab = NULL;
   uint8_t c, next;
-  unsigned iovecs = 0;
-  size_t remainder = 0;
+  ssize_t used = 0;
+
+  if (bytes < 0) {
+    errno = EINVAL;
+    return -1;
+  }
 
   for (c = ac->data_head; bytes && c != 0xff; c = next) {
+    ab = &ac->buffers[c];
+
     if (ab->prefix_used < ab->prefix_len) {
       size_t a = ab->prefix_len - ab->prefix_used;
       if (a > bytes) a = bytes;
-      ab->prefix_len += a;
+      ab->prefix_used += a;
       bytes -= a;
     }
 
@@ -948,7 +992,7 @@ obstcp_accum_commit(struct obstcp_accum *ac, size_t bytes,
     if (a > bytes) a = bytes;
     ab->payload_used += a;
     bytes -= a;
-    remainder = a;
+    used += a;
 
     next = ab->next;
 
@@ -958,11 +1002,8 @@ obstcp_accum_commit(struct obstcp_accum *ac, size_t bytes,
       ac->data_head = ab->next;
       if (ac->data_head == 0xff) ac->data_tail = 0xff;
 
-      ac->free_head = c;
       ab->next = ac->free_head;
-
-      iovecs++;
-      remainder = 0;
+      ac->free_head = c;
     }
   }
 
@@ -973,8 +1014,5 @@ obstcp_accum_commit(struct obstcp_accum *ac, size_t bytes,
     return -1;
   }
 
-  *oiovecs = iovecs;
-  *oremainder = remainder;
-
-  return 0;
+  return used;
 }
