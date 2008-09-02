@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <assert.h>
 
 #include <stdio.h>   // DEBUG ONLY
 
@@ -515,34 +516,29 @@ obstcp_server_ready(const struct obstcp_server_ctx *ctx) {
 
 ssize_t EXPORTED
 obstcp_server_encrypt(struct obstcp_server_ctx *ctx, uint8_t *output,
-                      const uint8_t *buffer, size_t len,
-                      char frame_accum) {
+                      const uint8_t *buffer, size_t len) {
   encrypt(&ctx->u.b.out, output, buffer, len);
   if (!ctx->frame_valid && ctx->state == SRV_ST_2ND_FRAME_PENDING) {
     ctx->state = SRV_ST_RUNNING;
   }
 
   ctx->frame_valid = 1;
-  ctx->frame_open = frame_accum ? 1 : 0;
 
   return len;
 }
 
 int EXPORTED
-obstcp_server_ends(struct obstcp_server_ctx *ctx,
-                   struct iovec *start, struct iovec *end) {
+obstcp_server_prefix(struct obstcp_server_ctx *ctx, struct iovec *prefix) {
   static const uint8_t banner[2] = {0, 0};
 
-  if (!ctx->frame_valid || ctx->frame_open) return -1;
-
-  end->iov_len = 0;
+  if (!ctx->frame_valid) return -1;
 
   if (ctx->state == SRV_ST_FIRST_FRAME) {
-    start->iov_base = (void *) banner;
-    start->iov_len = 2;
+    prefix->iov_base = (void *) banner;
+    prefix->iov_len = 2;
     return 1;
   } else {
-    start->iov_len = 0;
+    prefix->iov_len = 0;
     return 0;
   }
 }
@@ -755,24 +751,230 @@ ssize_t PUBLIC
 obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
                    uint8_t *buffer, size_t len, char *ready) {
   intptr_t fdptr = (intptr_t) fd;
-  obstcp_client_in(ctx, buffer, len, ready, read_wrapper, (void *) fdptr);
+  return obstcp_client_in(ctx, buffer, len, ready, read_wrapper, (void *) fdptr);
 }
 
 ssize_t EXPORTED
 obstcp_client_encrypt(struct obstcp_client_ctx *ctx, uint8_t *output,
-                      const uint8_t *buffer, size_t len,
-                      char frame_accum) {
+                      const uint8_t *buffer, size_t len) {
   encrypt(&ctx->out, output, buffer, len);
-  ctx->frame_open = frame_accum ? 1 : 0;
 
   return len;
 }
 
 int EXPORTED
-obstcp_client_ends(struct obstcp_client_ctx *ctx, struct iovec *start,
-                   struct iovec *end) {
-  if (ctx->frame_open) return -1;
-  start->iov_len = 0;
-  end->iov_len = 0;
+obstcp_client_prefix(struct obstcp_client_ctx *ctx, struct iovec *prefix) {
+  prefix->iov_len = 0;
+  return 0;
+}
+
+
+// -----------------------------------------------------------------------------
+
+void EXPORTED
+obstcp_accum_init(struct obstcp_accum *ac) {
+  ac->head = 0xffff;
+}
+
+struct iovec_cursor {
+  struct iovec *iov;  // pointer to the iovecs
+  unsigned count;     // number of iovecs
+  unsigned i;         // current iovec
+  size_t j;           // offset into current iovec
+};
+
+static void
+iovec_cursor_init(struct iovec_cursor *c,
+                  struct iovec *iov, unsigned count) {
+  c->iov = iov;
+  c->count = count;
+  c->i = 0;
+  c->j = 0;
+}
+
+static char
+iovec_cursor_full(struct iovec_cursor *c) {
+  return c->i == c->count;
+};
+
+static void
+iovec_cursor_append(struct iovec_cursor *c, const void *a, size_t len) {
+  c->iov[c->i].iov_base = (void *) a;
+  c->iov[c->i++].iov_len = len;
+};
+
+static void
+iovec_cursor_get(struct iovec *iov, struct iovec_cursor *c, size_t len) {
+  assert(!iovec_cursor_full(c));
+
+  size_t count = c->iov[c->i].iov_len - c->j;
+  if (count > len) count = len;
+
+  iov->iov_base = c->iov[c->i].iov_base + c->j;
+  iov->iov_len = count;
+  c->j += count;
+  if (c->j == c->iov[c->i].iov_len) {
+    c->j = 0;
+    c->i++;
+  }
+}
+
+static size_t
+iovec_cursor_copy(struct iovec_cursor *dest, struct iovec_cursor *src,
+                  size_t len) {
+  while (len && dest->i < dest->count && src->i < src->count) {
+    size_t bytes = src->iov[src->i].iov_len - src->j;
+    if (bytes > len) bytes = len;
+
+    dest->iov[dest->i].iov_base = src->iov[src->i].iov_base + src->j;
+    dest->iov[dest->i].iov_len = bytes;
+
+    len -= bytes;
+    src->j += bytes;
+    if (src->j == src->iov[src->i].iov_len) {
+      src->j = 0;
+      src->i++;
+    }
+    dest->i++;
+  }
+
+  return len;
+}
+
+void EXPORTED
+obstcp_accum_prepare(struct obstcp_accum *ac,
+                     struct iovec *out, unsigned *onumout,
+                     const struct iovec *in, unsigned numin) {
+  const unsigned numout = *onumout;
+  struct iovec_cursor outc, inc;
+  struct obstcp_accum_buffer *ab = NULL;
+  uint8_t c;
+
+  iovec_cursor_init(&outc, out, numout);
+  iovec_cursor_init(&inc, (struct iovec *) in, numin);
+
+  // walk the list of buffers and add them to the output list
+  for (c = ac->data_head; c != 0xff; c = ab->next) {
+    ab = &ac->buffers[c];
+
+    if (iovec_cursor_full(&outc)) goto out;
+    if (ab->prefix_used < ab->prefix_len) {
+      iovec_cursor_append(&outc,
+                          ab->prefix + ab->prefix_used,
+                          ab->prefix_len - ab->prefix_used);
+    }
+
+    if (iovec_cursor_full(&outc)) goto out;
+    iovec_cursor_copy(&outc, &inc, ab->payload_len - ab->payload_used);
+  }
+
+  if (iovec_cursor_full(&outc) || iovec_cursor_full(&inc)) goto out;
+
+  // If there are buffers remaining and data still in the input, we might as
+  // well encrypt some more.
+  while (ac->free_head != 0xff && !iovec_cursor_full(&inc)) {
+    unsigned frame_remaining = ac->frame_size;
+    struct iovec iov, iniov;
+
+    // try to fill up a whole frame
+    while (frame_remaining && !iovec_cursor_full(&inc)) {
+      iovec_cursor_get(&iov, &inc, frame_remaining);
+      if (ac->is_server) {
+        obstcp_server_encrypt((struct obstcp_server_ctx *) ac->ctx,
+                              iov.iov_base, iov.iov_base, iov.iov_len);
+      } else {
+        obstcp_client_encrypt((struct obstcp_client_ctx *) ac->ctx,
+                              iov.iov_base, iov.iov_base, iov.iov_len);
+      }
+      frame_remaining -= iov.iov_len;
+    }
+
+    // pop a buffer from the free list
+    const uint8_t buffer_num = ac->free_head;
+    ab = &ac->buffers[ac->free_head];
+    ac->free_head = ab->next;
+
+    if (ac->data_tail != 0xff) {
+      ac->buffers[ac->data_tail].next = buffer_num;
+    } else {
+      ac->data_head = buffer_num;
+    }
+    ac->data_tail = buffer_num;
+
+    ab->payload_len = ac->frame_size - frame_remaining;
+    ab->payload_used = ab->prefix_used = 0;
+    ab->next = 0xff;
+
+    if (ac->is_server) {
+      obstcp_server_prefix((struct obstcp_server_ctx *) ac->ctx, &iniov);
+    } else {
+      obstcp_client_prefix((struct obstcp_client_ctx *) ac->ctx, &iniov);
+    }
+
+    assert(iniov.iov_len < OBSTCP_MAX_PREFIX);
+    memcpy(ab->prefix, iniov.iov_base, iniov.iov_len);
+    ab->prefix_len = iniov.iov_len;
+
+    if (!iovec_cursor_full(&outc)) {
+      iovec_cursor_append(&outc, ab->prefix, ab->prefix_len);
+    }
+    if (!iovec_cursor_full(&outc)) {
+      iovec_cursor_append(&outc, iov.iov_base, iov.iov_len);
+    }
+  }
+
+ out:
+  *onumout = outc.i;
+  return;
+}
+
+int EXPORTED
+obstcp_accum_commit(struct obstcp_accum *ac, size_t bytes,
+                    unsigned *oiovecs, size_t *oremainder) {
+  struct obstcp_accum_buffer *ab = NULL;
+  uint8_t c, next;
+  unsigned iovecs = 0;
+  size_t remainder = 0;
+
+  for (c = ac->data_head; bytes && c != 0xff; c = next) {
+    if (ab->prefix_used < ab->prefix_len) {
+      size_t a = ab->prefix_len - ab->prefix_used;
+      if (a > bytes) a = bytes;
+      ab->prefix_len += a;
+      bytes -= a;
+    }
+
+    size_t a = ab->payload_len - ab->payload_used;
+    if (a > bytes) a = bytes;
+    ab->payload_used += a;
+    bytes -= a;
+    remainder = a;
+
+    next = ab->next;
+
+    if (ab->payload_len == ab->payload_used &&
+        ab->prefix_len == ab->prefix_used) {
+
+      ac->data_head = ab->next;
+      if (ac->data_head == 0xff) ac->data_tail = 0xff;
+
+      ac->free_head = c;
+      ab->next = ac->free_head;
+
+      iovecs++;
+      remainder = 0;
+    }
+  }
+
+  // The user has claimed to have written more bytes than we've ever given
+  // them.
+  if (bytes) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  *oiovecs = iovecs;
+  *oremainder = remainder;
+
   return 0;
 }

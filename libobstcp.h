@@ -10,6 +10,8 @@ extern "C" {
 
 #define PUBLIC __attribute__((visibility("default")))
 
+#define OBSTCP_MAX_PREFIX 64
+
 // -----------------------------------------------------------------------------
 // struct obstcp_keypair - a public/private key pair
 // keyid: the 32-bit xor folding of the public key
@@ -190,11 +192,11 @@ int PUBLIC obstcp_server_ready(const struct obstcp_server_ctx *ctx);
 // blocking.
 //
 // ssize_t write_data(int fd, uint8_t *data, size_t len) {
-//   struct iovec[3] iov;
+//   struct iovec[2] iov;
 //
-//   const unsigned n = obstcp_server_encrypt(ctx, data, data, len, 0);
+//   const unsigned n = obstcp_server_encrypt(ctx, data, data, len);
 //
-//   switch (obstcp_server_ends(ctx, &iovec[0], &iovec[2])) {
+//   switch (obstcp_server_prefix(ctx, &iovec[0])) {
 //   case -1:
 //     abort();
 //   case 0:
@@ -202,12 +204,12 @@ int PUBLIC obstcp_server_ready(const struct obstcp_server_ctx *ctx);
 //   default:
 //     iovec[1].iov_base = data;
 //     iovec[1].iov_len = n;
-//     return writev(fd, iovec, 3);
+//     return writev(fd, iovec, 2);
 //   }
 // }
 //
 // Note that, for non-blocking sockets it's up to the application to deal with
-// feeding the data to the socket. However, obstcp_server_ends may be called
+// feeding the data to the socket. However, obstcp_server_prefix may be called
 // repeatedly to get the same data.
 // -----------------------------------------------------------------------------
 
@@ -218,41 +220,36 @@ int PUBLIC obstcp_server_ready(const struct obstcp_server_ctx *ctx);
 // output: encrypted data is written here (maybe equal to @buffer)
 // buffer: data to be encrypted
 // len: the length, in bytes, of @buffer and @output.
-// frame_accum: if true, more data is next so don't close out the frame.
 // returns: the number of bytes encrypted
 //
-// A frame can cover, at most, 16384 bytes, so if you repeatedly call this
-// function with frame_accum true it may return less than @len bytes to denote
-// that the frame is full.
+// A frame is finite, so if you repeatedly call this function it may return
+// less than @len bytes to denote that the frame is full.
 //
 // NB that the peer cannot process anything until a frame's worth of data has
 // been processed. Thus, if this is the end of a message, and you expect the
-// client to answer you, you must close out the frame.
+// client to answer you, you must close out the frame by calling _prefix.
 //
-// Before writing anything to a socket you must call obstcp_server_ends to get
-// the prepended and appended data for the frame.
+// Before writing anything to a socket you must call obstcp_server_prefix to get
+// the prepended data for the frame.
 // -----------------------------------------------------------------------------
 ssize_t PUBLIC obstcp_server_encrypt(struct obstcp_server_ctx *ctx,
-                                     uint8_t *output, const uint8_t *buffer, size_t len,
-                                    char frame_accum);
+                                     uint8_t *output, const uint8_t *buffer, size_t len);
 
 // -----------------------------------------------------------------------------
-// The protocol may need to prepend and append data to a frame. Call this
-// function to get that data. You pass it two iovec's: one to be sent at the
-// beginning of the frame and one to be sent at the end.
+// The protocol may need to prepend data to a frame. Call this function to get
+// that data.
 //
 // returns: -1 on error, or the number of iovecs with data.
 //
 // If this function returns -1 it means there has been a programming error on
-// the part of the library user. Either you haven't closed out a frame or you
-// haven't opened one. Aborting the process is reasonable in this case.
+// the part of the library user.  Aborting the process is reasonable in this
+// case.
 //
 // Note that some connections may not having framing, thus this function may
 // return 0. It's worth detecting this and falling back to a simple write()
 // rather than a writev() in this case.
 // -----------------------------------------------------------------------------
-int PUBLIC obstcp_server_ends(struct obstcp_server_ctx *ctx, struct iovec *start,
-                              struct iovec *end);
+int PUBLIC obstcp_server_prefix(struct obstcp_server_ctx *ctx, struct iovec *prefix);
 
 // -----------------------------------------------------------------------------
 
@@ -315,16 +312,90 @@ ssize_t PUBLIC obstcp_client_in(struct obstcp_client_ctx *ctx,
 // Same as the server version
 // -----------------------------------------------------------------------------
 ssize_t PUBLIC obstcp_client_encrypt(struct obstcp_client_ctx *ctx,
-                                     uint8_t *output, const uint8_t *buffer, size_t len,
-                                     char frame_accum);
+                                     uint8_t *output, const uint8_t *buffer, size_t len);
 
 // -----------------------------------------------------------------------------
 // Same as the server version
 // -----------------------------------------------------------------------------
-int PUBLIC obstcp_client_ends(struct obstcp_client_ctx *ctx, struct iovec *start,
-                              struct iovec *end);
+int PUBLIC obstcp_client_prefix(struct obstcp_client_ctx *ctx, struct iovec *prefix);
 
 // -----------------------------------------------------------------------------
+
+
+// -----------------------------------------------------------------------------
+// Accumulation buffers.
+//
+// These are helper functions for dealing with the business of keeping track of
+// what data has been encrypted. If you are writing code from scratch you
+// should be able to avoid using these. However, if you are modifying existing
+// code they may be of use...
+
+struct obstcp_accum_buffer {
+  uint16_t payload_len, payload_used;
+  uint8_t prefix_len, prefix_used;
+  uint8_t next, padding;
+  uint8_t prefix[OBSTCP_MAX_PREFIX];
+};
+
+struct obstcp_accum {
+  void *ctx;
+  uint16_t head;
+  uint16_t frame_size;
+  struct obstcp_accum_buffer buffers[6];
+  uint8_t free_head, data_head, data_tail, is_server;
+};
+
+// -----------------------------------------------------------------------------
+// Init an accum_buffer object using a client context for encryption
+// -----------------------------------------------------------------------------
+void PUBLIC obstcp_client_accum_init(struct obstcp_accum *,
+                                     struct obstcp_client_ctx *ctx);
+
+// -----------------------------------------------------------------------------
+// Init an accum_buffer object using a server context for encryption
+// -----------------------------------------------------------------------------
+void PUBLIC obstcp_server_accum_init(struct obstcp_accum *,
+                                     struct obstcp_server_ctx *ctx);
+
+// -----------------------------------------------------------------------------
+// Fills in a number of output iovec structures with data that is ready to be
+// transmitted. The source of the output is a array of input iovec objects
+// that are encrypted in place.
+//
+// ac: a valid accum_buffer structure
+// out: (output) points to the start of an array of iovec structures
+// numout: (input/output) on entry, contains the number of iovec structures
+//   pointed to by @out. On exit, contains the number of valid structures
+// in; an array of iovec structures pointing to application level data that is
+//   to be encrypted in place.
+// numin: the number of iovecs pointed to by @in
+//
+// Note that you are expected to call this multiple times since the kernel
+// generally won't enqueue all the data you give it unless it's only a small
+// amount. After enqueuing data with the kernel you must call _commit (below)
+// to tell the accum buffer that some data is done with.
+//
+// Next time you call this function, you must call it with the correct iovecs.
+// That is, if you call it with input iovecs A, B, C, and then commit tells you
+// that it's done with one and a half iovecs, next time you call _prepare, it's
+// with B[n..], C (and possibly D etc).
+// -----------------------------------------------------------------------------
+void PUBLIC obstcp_accum_prepare(struct obstcp_accum *ac,
+                                 struct iovec *out, unsigned *numout,
+                                 const struct iovec *in, unsigned numin);
+
+// -----------------------------------------------------------------------------
+// After enqueuing data with the kernel, call this function to find out how
+// much application level data has been enqueued.
+//
+// ac: a valid accum_buffer structure, on which _prepare has just been called
+// result: the number of bytes that the kernel enqueued
+// iovecs: (output) the number of input iovecs enqueued
+// remainder: (output) the number of bytes in the remaining iovec which have
+//   been enqueued
+// -----------------------------------------------------------------------------
+int PUBLIC obstcp_accum_commit(struct obstcp_accum *ac, size_t result,
+                               unsigned *iovecs, size_t *remainder);
 
 #ifdef __cplusplus
 }

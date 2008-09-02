@@ -23,10 +23,9 @@ usage(const char *argv0) {
   return 1;
 }
 
-#define CHUNK_PRE 4
-#define CHUNK_POST 32
+#define CHUNK_PRE 64
 #define QUEUE_MAX 32768
-#define CHUNK_OVERHEAD (CHUNK_PRE + CHUNK_POST)
+#define CHUNK_OVERHEAD CHUNK_PRE
 
 struct chunk {
   struct chunk *next, *last;
@@ -115,18 +114,15 @@ chunks_move(struct chunk **tohead, struct chunk **totail,
 
 static void
 connection_obs_prepare(struct connection *conn, struct chunk *c) {
-  struct iovec iov[2];
+  struct iovec iov;
 
   obstcp_server_encrypt(&conn->ctx, c->data + c->done,
-                        c->data + c->done, c->length - c->done, 0);
-  obstcp_server_ends(&conn->ctx, &iov[0], &iov[1]);
-  if (iov[0].iov_len > CHUNK_PRE) abort();
-  if (iov[1].iov_len > CHUNK_POST) abort();
-  c->done -= iov[0].iov_len;
-  c->length += iov[0].iov_len;
-  memcpy(c->data + c->done, iov[0].iov_base, iov[0].iov_len);
-  memcpy(c->data + c->done + c->length, iov[1].iov_base, iov[1].iov_len);
-  c->length += iov[1].iov_len;
+                        c->data + c->done, c->length - c->done);
+  obstcp_server_prefix(&conn->ctx, &iov);
+  if (iov.iov_len > CHUNK_PRE) abort();
+  c->done -= iov.iov_len;
+  c->length += iov.iov_len;
+  memcpy(c->data + c->done, iov.iov_base, iov.iov_len);
 }
 
 static int

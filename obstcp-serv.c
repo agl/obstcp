@@ -131,10 +131,10 @@ server() {
         perror("reading from stdin");
         return 1;
       } else {
-        struct iovec iov[3];
+        struct iovec iov[2];
 
-        obstcp_server_encrypt(&ctx, buffer, buffer, n, 0);
-        const int a = obstcp_server_ends(&ctx, &iov[0], &iov[2]);
+        obstcp_server_encrypt(&ctx, buffer, buffer, n);
+        const int a = obstcp_server_prefix(&ctx, &iov[0]);
         if (a == -1) {
           perror("obstcp_server_ends");
           return 1;
@@ -143,7 +143,7 @@ server() {
         } else {
           iov[1].iov_base = buffer;
           iov[1].iov_len = n;
-          writev(nfd, iov, 3);
+          writev(nfd, iov, 2);
         }
       }
     } else {
