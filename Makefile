@@ -1,9 +1,10 @@
 CFLAGS=-ggdb -fPIC -Wall -fvisibility=hidden
+TARGETS=libobstcp.a libobstcp.so.1 obstcp-serv obstcp-cli obstcp-redir obstcp-keygen
 
-targets: libobstcp.a libobstcp.so.1 obstcp-serv obstcp-cli obstcp-redir
+targets: $(TARGETS)
 
 clean:
-	rm -f *.o *.a *.pp
+	rm -f *.o *.a *.pp $(TARGETS)
 
 obstcp-redir: libobstcp.a obstcp-redir.c
 	gcc $(CFLAGS) -o obstcp-redir obstcp-redir.c libobstcp.a -levent
@@ -13,6 +14,9 @@ obstcp-serv: libobstcp.a obstcp-serv.c
 
 obstcp-cli: libobstcp.a obstcp-cli.c
 	gcc $(CFLAGS) -o obstcp-cli obstcp-cli.c libobstcp.a
+
+obstcp-keygen: obstcp-keygen.c libobstcp.a
+	gcc $(CFLAGS) -o obstcp-keygen obstcp-keygen.c libobstcp.a
 
 libobstcp.so.1: libobstcp.o salsa20-merged.o sha256.o base64.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o
 	gcc -o libobstcp.so.1 -shared -Wl,-soname -Wl,libobstcp.so.1 -ldl libobstcp.o salsa20-merged.o sha256.o base64.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o
