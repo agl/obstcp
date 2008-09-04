@@ -1,0 +1,430 @@
+diff -ur mozilla/netwerk/base/src/Makefile.in mozilla/netwerk/base/src/Makefile.in
+--- mozilla/netwerk/base/src/Makefile.in	2008-02-21 12:39:22.000000000 -0800
++++ mozilla/netwerk/base/src/Makefile.in	2008-08-26 18:40:29.000000000 -0700
+@@ -95,6 +95,8 @@
+ 		nsSerializationHelper.cpp \
+ 		$(NULL)
+ 
++LIBS += -lobstcp
++
+ ifeq ($(MOZ_WIDGET_TOOLKIT),os2)
+ 	CPPSRCS += nsURLHelperOS2.cpp
+ else
+diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/src/nsSocketTransport2.cpp
+--- mozilla/netwerk/base/src/nsSocketTransport2.cpp	2008-03-19 15:12:28.000000000 -0700
++++ mozilla/netwerk/base/src/nsSocketTransport2.cpp	2008-09-03 16:31:02.000000000 -0700
+@@ -48,6 +48,8 @@
+ #include "nsNetSegmentUtils.h"
+ #include "nsTransportUtils.h"
+ #include "nsProxyInfo.h"
++#include "nsIPrefService.h"
++#include "nsIPrefBranch2.h"
+ #include "nsNetCID.h"
+ #include "nsAutoLock.h"
+ #include "nsAutoPtr.h"
+@@ -59,7 +61,9 @@
+ #include "plstr.h"
+ #include "prnetdb.h"
+ #include "prerror.h"
++#include "prrng.h"
+ #include "prerr.h"
++#include "prlock.h"
+ 
+ #include "nsIServiceManager.h"
+ #include "nsIProxyObjectManager.h"
+@@ -75,6 +79,10 @@
+ #include "nsNativeConnectionHelper.h"
+ #endif
+ 
++#include <unistd.h>
++
++#include <libobstcp.h>
++
+ //-----------------------------------------------------------------------------
+ 
+ static NS_DEFINE_CID(kSocketProviderServiceCID, NS_SOCKETPROVIDERSERVICE_CID);
+@@ -82,6 +90,26 @@
+ 
+ //-----------------------------------------------------------------------------
+ 
++// -----------------------------------------------------------------------------
++// Get the per-process keys structure. Not thread safe. Dodgy as hell.
++// -----------------------------------------------------------------------------
++static struct obstcp_keys *
++ns_obstcp_get_keys() {
++    static struct obstcp_keys keys;
++    static char keys_init = 0;
++
++    if (!keys_init) {
++        PRUint8 secret[32];
++        PR_GetRandomNoise(secret, sizeof(secret));
++
++        obstcp_keys_init(&keys);
++        obstcp_keys_key_add(&keys, secret);
++        keys_init = 1;
++    }
++
++    return &keys;
++}
++
+ class nsSocketEvent : public nsRunnable
+ {
+ public:
+@@ -326,6 +354,13 @@
+     return rv;
+ }
+ 
++static ssize_t
++ReadWrapper(void *ptr, void *buffer, size_t len) {
++    PRFileDesc *fd = (PRFileDesc *) ptr;
++
++    return PR_Read(fd, buffer, len);
++}
++
+ NS_IMETHODIMP
+ nsSocketInputStream::Read(char *buf, PRUint32 count, PRUint32 *countRead)
+ {
+@@ -350,7 +385,15 @@
+     // cannot hold lock while calling NSPR.  (worried about the fact that PSM
+     // synchronously proxies notifications over to the UI thread, which could
+     // mistakenly try to re-enter this code.)
+-    PRInt32 n = PR_Read(fd, buf, count);
++    PRInt32 n;
++
++    if (mTransport->mObfuscation) {
++        char ready;
++        n = obstcp_client_in(&mTransport->mObsContext, (PRUint8 *) buf, count, &ready,
++                             ReadWrapper, fd);
++    } else {
++        n = PR_Read(fd, buf, count);
++    }
+ 
+     LOG(("  PR_Read returned [n=%d]\n", n));
+ 
+@@ -469,17 +512,56 @@
+ // socket output stream impl 
+ //-----------------------------------------------------------------------------
+ 
++struct chunk {
++  struct chunk *next, *last;
++  unsigned length, done;
++  PRUint8 data[1];
++};
++
++static void
++chunk_nq(struct chunk *c, struct chunk **head, struct chunk **tail) {
++  c->last = *tail;
++  c->next = NULL;
++  *tail = c;
++  if (!*head) *head = c;
++}
++
++static void
++chunk_free(struct chunk **head, struct chunk **tail) {
++  if ((*head)->next)
++    (*head)->next->last = NULL;
++
++  struct chunk *next = (*head)->next;
++  free(*head);
++
++  if (*tail == *head) *tail = NULL;
++  *head = next;
++}
++
++static void
++chunks_free(struct chunk *head) {
++    struct chunk *next;
++
++    for (; head; head = next) {
++        next = head->next;
++        free(head);
++    }
++}
++
+ nsSocketOutputStream::nsSocketOutputStream(nsSocketTransport *trans)
+     : mTransport(trans)
+     , mWriterRefCnt(0)
+     , mCondition(NS_OK)
+     , mCallbackFlags(0)
+     , mByteCount(0)
++    , mChunkHead(0)
++    , mChunkTail(0)
+ {
+ }
+ 
+ nsSocketOutputStream::~nsSocketOutputStream()
+ {
++    chunks_free(mChunkHead);
+ }
+ 
+ // called on the socket transport thread...
+@@ -553,6 +635,10 @@
+ 
+     *countWritten = 0;
+ 
++    static const unsigned kNumIOV = 16;
++    PRIOVec iov[16];
++    unsigned numiov;
++
+     if (count == 0)
+         return NS_OK;
+ 
+@@ -566,6 +652,47 @@
+         fd = mTransport->GetFD_Locked();
+         if (!fd)
+             return NS_BASE_STREAM_WOULD_BLOCK;
++
++        if (mTransport->mObfuscation) {
++            size_t pending = 0;
++            struct iovec iniov[kNumIOV], outiov[kNumIOV];
++            unsigned j = 0;  // indexes @iniov
++
++            for (struct chunk *c = mChunkHead; c; c = c->next) {
++                pending += c->length - c->done;
++                if (j < kNumIOV) {
++                    iniov[j].iov_base = c->data + c->done;
++                    iniov[j++].iov_len = c->length - c->done;
++                }
++            }
++
++            const size_t toEnqueue = count > pending ? count - pending : 0;
++            if (toEnqueue) {
++                struct chunk *c = (struct chunk *) malloc(sizeof(struct chunk) + toEnqueue);
++                memset(c, 0, sizeof(struct chunk));
++                c->length = toEnqueue;
++                memcpy(c->data, buf + pending, toEnqueue);
++                chunk_nq(c, &mChunkHead, &mChunkTail);
++                if (j < kNumIOV) {
++                    iniov[j].iov_base = c->data;
++                    iniov[j++].iov_len = c->length;
++                }
++            }
++
++            unsigned numout = kNumIOV;
++            obstcp_accum_prepare(&mTransport->mObsAccum, outiov, &numout,
++                                 iniov, j);
++            // copy from the real iovecs to PR's iovecs
++            for (unsigned i = 0; i < numout; ++i) {
++                iov[i].iov_base = (char *) outiov[i].iov_base;
++                iov[i].iov_len = outiov[i].iov_len;
++            }
++            numiov = numout;
++        } else {
++            numiov = 1;
++            iov[0].iov_base = (char *) buf;
++            iov[0].iov_len = count;
++        }
+     }
+ 
+     LOG(("  calling PR_Write [count=%u]\n", count));
+@@ -573,7 +700,14 @@
+     // cannot hold lock while calling NSPR.  (worried about the fact that PSM
+     // synchronously proxies notifications over to the UI thread, which could
+     // mistakenly try to re-enter this code.)
+-    PRInt32 n = PR_Write(fd, buf, count);
++
++    PRInt32 n;
++
++    if (numiov == 1) {
++        n = PR_Write(fd, iov[0].iov_base, iov[0].iov_len);
++    } else if (numiov > 1) {
++        n = PR_Writev(fd, iov, numiov, 0);
++    }
+ 
+     LOG(("  PR_Write returned [n=%d]\n", n));
+     NS_ASSERTION(n != 0, "unexpected return value");
+@@ -583,15 +717,28 @@
+         nsAutoLock lock(mTransport->mLock);
+ 
+ #ifdef ENABLE_SOCKET_TRACING
+-    if (n > 0)
+-        mTransport->TraceOutBuf(buf, n);
++        if (n > 0) mTransport->TraceOutBuf(buf, n);
+ #endif
+ 
+         mTransport->ReleaseFD_Locked(fd);
+ 
+-        if (n > 0)
+-            mByteCount += (*countWritten = n);
+-        else if (n < 0) {
++        if (n > 0) {
++            *countWritten = n;
++            mByteCount += n;
++            if (mTransport->mObfuscation) {
++                const ssize_t bytes_written = obstcp_accum_commit(&mTransport->mObsAccum, n);
++
++                struct chunk *next;
++                for (struct chunk *c = mChunkHead; c; c = next) {
++                    next = c->next;
++                    const ssize_t todo = c->length - c->done;
++                    ssize_t done = bytes_written;
++                    if (done > todo) done = todo;
++                    c->done += done;
++                    if (c->done == c->length) chunk_free(&mChunkHead, &mChunkTail);
++                }
++            }
++        } else if (n < 0) {
+             PRErrorCode code = PR_GetError();
+             if (code == PR_WOULD_BLOCK_ERROR)
+                 return NS_BASE_STREAM_WOULD_BLOCK;
+@@ -712,6 +859,7 @@
+     , mInputClosed(PR_TRUE)
+     , mOutputClosed(PR_TRUE)
+     , mResolving(PR_FALSE)
++    , mObfuscation(0)
+     , mLock(PR_NewLock())
+     , mFD(nsnull)
+     , mFDref(0)
+@@ -1155,11 +1303,48 @@
+     // 
+     // Initiate the connect() to the host...  
+     //
++    struct obstcp_keys *const keys = ns_obstcp_get_keys();
++    nsXPIDLCString tempString;
++
++    nsCOMPtr<nsIPrefBranch> prefs = do_GetService(NS_PREFSERVICE_CONTRACTID);
++    if (mProxyPort == 0 && strlen(mHost.get()) && mPort == 80) {
++        char buffer[512];
++        snprintf(buffer, 512, "network.obstcp.%s", mHost.get());
++
++        nsresult prefsrv =
++            prefs->GetCharPref(buffer, getter_Copies(tempString));
++        if (NS_SUCCEEDED(prefsrv)) {
++            const char msg[] = "OBSTCP:switching\n";
++            write(1, msg, strlen(msg));
++            int newport;
++
++            if (obstcp_advert_parse(tempString.get(), strlen(tempString.get()),
++                                    OBSTCP_ADVERT_OBSPORT, &newport,
++                                    OBSTCP_ADVERT_END) &&
++                newport) {
++                mNetAddr.inet.port = htons(newport);
++                mObfuscation = 1;
++                PRUint8 random[16];
++                PR_GetRandomNoise(random, sizeof(random));
++                if (!obstcp_client_ctx_init(&mObsContext, keys, tempString.get(),
++                                            strlen(tempString.get()), random)) {
++                    abort();
++                }
++                obstcp_client_accum_init(&mObsAccum, &mObsContext);
++            }
++        }
++    }
++
+     status = PR_Connect(fd, &mNetAddr, NS_SOCKET_CONNECT_TIMEOUT);
+     if (status == PR_SUCCESS) {
+         // 
+         // we are connected!
+         //
++        if (mObfuscation) {
++            struct iovec iov;
++            obstcp_client_banner(&mObsContext, &iov);
++            PR_Write(fd, iov.iov_base, iov.iov_len);
++        }
+         OnSocketConnected();
+     }
+     else {
+@@ -1179,6 +1364,11 @@
+             //
+             // we are connected!
+             //
++            if (mObfuscation) {
++                struct iovec iov;
++                obstcp_client_banner(&mObsContext, &iov);
++                PR_Write(fd, iov.iov_base, iov.iov_len);
++            }
+             OnSocketConnected();
+ 
+             if (mSecInfo && !mProxyHost.IsEmpty() && proxyTransparent && usingSSL) {
+@@ -1506,6 +1696,11 @@
+             //
+             // we are connected!
+             //
++            if (mObfuscation) {
++                struct iovec iov;
++                obstcp_client_banner(&mObsContext, &iov);
++                PR_Write(fd, iov.iov_base, iov.iov_len);
++            }
+             OnSocketConnected();
+         }
+         else {
+Only in mozilla/netwerk/base/src: .nsSocketTransport2.cpp.swp
+diff -ur mozilla/netwerk/base/src/nsSocketTransport2.h mozilla/netwerk/base/src/nsSocketTransport2.h
+--- mozilla/netwerk/base/src/nsSocketTransport2.h	2008-02-21 12:39:22.000000000 -0800
++++ mozilla/netwerk/base/src/nsSocketTransport2.h	2008-09-03 15:28:34.000000000 -0700
+@@ -56,6 +56,8 @@
+ #include "nsICancelable.h"
+ #include "nsIClassInfo.h"
+ 
++#include <libobstcp.h>
++
+ class nsSocketTransport;
+ 
+ //-----------------------------------------------------------------------------
+@@ -95,6 +97,8 @@
+ 
+ //-----------------------------------------------------------------------------
+ 
++struct chunk;
++
+ class nsSocketOutputStream : public nsIAsyncOutputStream
+ {
+ public:
+@@ -125,6 +129,8 @@
+     nsCOMPtr<nsIOutputStreamCallback> mCallback;
+     PRUint32                          mCallbackFlags;
+     nsUint64                          mByteCount;
++    struct chunk                      *mChunkHead;
++    struct chunk                      *mChunkTail;
+ };
+ 
+ //-----------------------------------------------------------------------------
+@@ -224,6 +230,9 @@
+     nsCOMPtr<nsICancelable> mDNSRequest;
+     nsCOMPtr<nsIDNSRecord>  mDNSRecord;
+     PRNetAddr               mNetAddr;
++    bool                    mObfuscation;
++    struct obstcp_client_ctx mObsContext;
++    struct obstcp_accum     mObsAccum;
+ 
+     // socket methods (these can only be called on the socket thread):
+ 
+Only in mozilla/netwerk/base/src: .nsSocketTransport2.h.swp
+diff -ur mozilla/nsprpub/pr/include/prio.h mozilla/nsprpub/pr/include/prio.h
+--- mozilla/nsprpub/pr/include/prio.h	2004-04-25 08:00:47.000000000 -0700
++++ mozilla/nsprpub/pr/include/prio.h	2008-08-26 20:16:55.000000000 -0700
+@@ -343,6 +343,7 @@
+     PRIntervalTime timeout);
+ typedef PRStatus (PR_CALLBACK *PRConnectFN)(
+     PRFileDesc *fd, const PRNetAddr *addr, PRIntervalTime timeout);
++typedef PRUint32 (PR_CALLBACK *PRSocketOutQFN)(PRFileDesc *fd);
+ typedef PRFileDesc* (PR_CALLBACK *PRAcceptFN) (
+     PRFileDesc *fd, PRNetAddr *addr, PRIntervalTime timeout);
+ typedef PRStatus (PR_CALLBACK *PRBindFN)(PRFileDesc *fd, const PRNetAddr *addr);
+@@ -417,7 +418,7 @@
+     PRSendfileFN sendfile;			/* Send a (partial) file with header/trailer*/
+     PRConnectcontinueFN connectcontinue;
+                                     /* Continue a nonblocking connect */
+-    PRReservedFN reserved_fn_3;		/* reserved for future use */
++    void *outq;
+     PRReservedFN reserved_fn_2;		/* reserved for future use */
+     PRReservedFN reserved_fn_1;		/* reserved for future use */
+     PRReservedFN reserved_fn_0;		/* reserved for future use */
+@@ -1253,6 +1254,8 @@
+ 
+ NSPR_API(PRFileDesc*)    PR_OpenTCPSocket(PRIntn af);
+ 
++NSPR_API(PRUint32) PR_SocketOutQ(PRFileDesc *);
++
+ /*
+  *************************************************************************
+  * FUNCTION: PR_Connect
+diff -ur mozilla/toolkit/library/Makefile.in mozilla/toolkit/library/Makefile.in
+--- mozilla/toolkit/library/Makefile.in	2008-05-08 02:20:45.000000000 -0700
++++ mozilla/toolkit/library/Makefile.in	2008-08-26 18:55:32.000000000 -0700
+@@ -253,3 +253,5 @@
+ ifneq (,$(filter layout-debug,$(MOZ_EXTENSIONS)))
+ DEFINES += -DMOZ_ENABLE_EXTENSION_LAYOUT_DEBUG
+ endif
++
++EXTRA_DSO_LDOPTS += -lobstcp
