@@ -1,3 +1,6 @@
+// Copyright 2008, Google Inc.
+// All rights reserved.
+
 #ifndef LIBOBSTCP_H
 #define LIBOBSTCP_H
 

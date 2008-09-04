@@ -1,3 +1,6 @@
+// Copyright 2008, Google Inc.
+// All rights reserved.
+
 #ifndef BASE64_H
 #define BASE64_H
 

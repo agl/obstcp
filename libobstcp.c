@@ -1,3 +1,6 @@
+// Copyright 2008, Google Inc.
+// All rights reserved.
+
 #include <unistd.h>
 #include <stdint.h>
 #include <stdarg.h>
