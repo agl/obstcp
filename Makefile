@@ -3,6 +3,12 @@ TARGETS=libobstcp.a libobstcp.so.1 obstcp-serv obstcp-cli obstcp-redir obstcp-ke
 
 targets: $(TARGETS)
 
+install: libobstcp.so.1 libobstcp.h
+	cp libobstcp.h /usr/include
+	cp libobstcp.so.1 /usr/lib
+	ln -sf /usr/lib/libobstcp.so.1 /usr/lib/libobstcp.so
+	ldconfig
+
 clean:
 	rm -f *.o *.a *.pp $(TARGETS)
 
@@ -20,7 +26,6 @@ obstcp-keygen: obstcp-keygen.c libobstcp.a
 
 libobstcp.so.1: libobstcp.o salsa20-merged.o sha256.o base64.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o
 	gcc -o libobstcp.so.1 -shared -Wl,-soname -Wl,libobstcp.so.1 -ldl libobstcp.o salsa20-merged.o sha256.o base64.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o
-	ln -sf libobstcp.so.1 libobstcp.so
 
 libobstcp.a: libobstcp.o salsa20-merged.o sha256.o base64.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o
 	ar -rc libobstcp.a libobstcp.o salsa20-merged.o sha256.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o base64.o
