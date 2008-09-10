@@ -1,7 +1,8 @@
-diff -ur mozilla/netwerk/base/src/Makefile.in mozilla/netwerk/base/src/Makefile.in
---- mozilla/netwerk/base/src/Makefile.in	2008-02-21 12:39:22.000000000 -0800
-+++ mozilla/netwerk/base/src/Makefile.in	2008-08-26 18:40:29.000000000 -0700
-@@ -95,6 +95,8 @@
+diff --git a/netwerk/base/src/Makefile.in b/netwerk/base/src/Makefile.in
+index 4c2dea5..1238a03 100644
+--- a/netwerk/base/src/Makefile.in
++++ b/netwerk/base/src/Makefile.in
+@@ -95,6 +95,8 @@ CPPSRCS		= \
  		nsSerializationHelper.cpp \
  		$(NULL)
  
@@ -10,9 +11,10 @@ diff -ur mozilla/netwerk/base/src/Makefile.in mozilla/netwerk/base/src/Makefile.
  ifeq ($(MOZ_WIDGET_TOOLKIT),os2)
  	CPPSRCS += nsURLHelperOS2.cpp
  else
-diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/src/nsSocketTransport2.cpp
---- mozilla/netwerk/base/src/nsSocketTransport2.cpp	2008-03-19 15:12:28.000000000 -0700
-+++ mozilla/netwerk/base/src/nsSocketTransport2.cpp	2008-09-03 16:31:02.000000000 -0700
+diff --git a/netwerk/base/src/nsSocketTransport2.cpp b/netwerk/base/src/nsSocketTransport2.cpp
+index e81a367..18b995e 100644
+--- a/netwerk/base/src/nsSocketTransport2.cpp
++++ b/netwerk/base/src/nsSocketTransport2.cpp
 @@ -48,6 +48,8 @@
  #include "nsNetSegmentUtils.h"
  #include "nsTransportUtils.h"
@@ -43,7 +45,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
  //-----------------------------------------------------------------------------
  
  static NS_DEFINE_CID(kSocketProviderServiceCID, NS_SOCKETPROVIDERSERVICE_CID);
-@@ -82,6 +90,26 @@
+@@ -82,6 +90,26 @@ static NS_DEFINE_CID(kDNSServiceCID, NS_DNSSERVICE_CID);
  
  //-----------------------------------------------------------------------------
  
@@ -70,12 +72,12 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
  class nsSocketEvent : public nsRunnable
  {
  public:
-@@ -326,6 +354,13 @@
+@@ -326,6 +354,13 @@ nsSocketInputStream::Available(PRUint32 *avail)
      return rv;
  }
  
 +static ssize_t
-+ReadWrapper(void *ptr, void *buffer, size_t len) {
++ReadWrapper(void *ptr, PRUint8 *buffer, size_t len) {
 +    PRFileDesc *fd = (PRFileDesc *) ptr;
 +
 +    return PR_Read(fd, buffer, len);
@@ -84,7 +86,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
  NS_IMETHODIMP
  nsSocketInputStream::Read(char *buf, PRUint32 count, PRUint32 *countRead)
  {
-@@ -350,7 +385,15 @@
+@@ -350,7 +385,14 @@ nsSocketInputStream::Read(char *buf, PRUint32 count, PRUint32 *countRead)
      // cannot hold lock while calling NSPR.  (worried about the fact that PSM
      // synchronously proxies notifications over to the UI thread, which could
      // mistakenly try to re-enter this code.)
@@ -92,8 +94,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
 +    PRInt32 n;
 +
 +    if (mTransport->mObfuscation) {
-+        char ready;
-+        n = obstcp_client_in(&mTransport->mObsContext, (PRUint8 *) buf, count, &ready,
++        n = obstcp_rbuf_read(&mTransport->mObsRBuf, (PRUint8 *) buf, count,
 +                             ReadWrapper, fd);
 +    } else {
 +        n = PR_Read(fd, buf, count);
@@ -101,7 +102,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
  
      LOG(("  PR_Read returned [n=%d]\n", n));
  
-@@ -469,17 +512,56 @@
+@@ -469,17 +511,56 @@ nsSocketInputStream::AsyncWait(nsIInputStreamCallback *callback,
  // socket output stream impl 
  //-----------------------------------------------------------------------------
  
@@ -158,7 +159,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
  }
  
  // called on the socket transport thread...
-@@ -553,6 +635,10 @@
+@@ -553,6 +634,10 @@ nsSocketOutputStream::Write(const char *buf, PRUint32 count, PRUint32 *countWrit
  
      *countWritten = 0;
  
@@ -169,7 +170,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
      if (count == 0)
          return NS_OK;
  
-@@ -566,6 +652,47 @@
+@@ -566,6 +651,47 @@ nsSocketOutputStream::Write(const char *buf, PRUint32 count, PRUint32 *countWrit
          fd = mTransport->GetFD_Locked();
          if (!fd)
              return NS_BASE_STREAM_WOULD_BLOCK;
@@ -217,7 +218,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
      }
  
      LOG(("  calling PR_Write [count=%u]\n", count));
-@@ -573,7 +700,14 @@
+@@ -573,7 +699,14 @@ nsSocketOutputStream::Write(const char *buf, PRUint32 count, PRUint32 *countWrit
      // cannot hold lock while calling NSPR.  (worried about the fact that PSM
      // synchronously proxies notifications over to the UI thread, which could
      // mistakenly try to re-enter this code.)
@@ -233,7 +234,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
  
      LOG(("  PR_Write returned [n=%d]\n", n));
      NS_ASSERTION(n != 0, "unexpected return value");
-@@ -583,15 +717,28 @@
+@@ -583,15 +716,28 @@ nsSocketOutputStream::Write(const char *buf, PRUint32 count, PRUint32 *countWrit
          nsAutoLock lock(mTransport->mLock);
  
  #ifdef ENABLE_SOCKET_TRACING
@@ -267,7 +268,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
              PRErrorCode code = PR_GetError();
              if (code == PR_WOULD_BLOCK_ERROR)
                  return NS_BASE_STREAM_WOULD_BLOCK;
-@@ -712,6 +859,7 @@
+@@ -712,6 +858,7 @@ nsSocketTransport::nsSocketTransport()
      , mInputClosed(PR_TRUE)
      , mOutputClosed(PR_TRUE)
      , mResolving(PR_FALSE)
@@ -275,7 +276,25 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
      , mLock(PR_NewLock())
      , mFD(nsnull)
      , mFDref(0)
-@@ -1155,11 +1303,48 @@
+@@ -730,6 +877,8 @@ nsSocketTransport::nsSocketTransport()
+ nsSocketTransport::~nsSocketTransport()
+ {
+     LOG(("destroying nsSocketTransport @%x\n", this));
++    if (mObfuscation)
++        obstcp_rbuf_free(&mObsRBuf);
+ 
+     // cleanup socket type info
+     if (mTypes) {
+@@ -741,7 +890,7 @@ nsSocketTransport::~nsSocketTransport()
+ 
+     if (mLock)
+         PR_DestroyLock(mLock);
+- 
++
+     nsSocketTransportService *serv = gSocketTransportService;
+     NS_RELEASE(serv); // nulls argument
+ }
+@@ -1155,11 +1304,49 @@ nsSocketTransport::InitiateSocket()
      // 
      // Initiate the connect() to the host...  
      //
@@ -307,6 +326,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
 +                    abort();
 +                }
 +                obstcp_client_accum_init(&mObsAccum, &mObsContext);
++                obstcp_rbuf_client_init(&mObsRBuf, &mObsContext);
 +            }
 +        }
 +    }
@@ -324,7 +344,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
          OnSocketConnected();
      }
      else {
-@@ -1179,6 +1364,11 @@
+@@ -1179,6 +1366,11 @@ nsSocketTransport::InitiateSocket()
              //
              // we are connected!
              //
@@ -336,7 +356,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
              OnSocketConnected();
  
              if (mSecInfo && !mProxyHost.IsEmpty() && proxyTransparent && usingSSL) {
-@@ -1506,6 +1696,11 @@
+@@ -1506,6 +1698,11 @@ nsSocketTransport::OnSocketReady(PRFileDesc *fd, PRInt16 outFlags)
              //
              // we are connected!
              //
@@ -348,10 +368,10 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.cpp mozilla/netwerk/base/sr
              OnSocketConnected();
          }
          else {
-Only in mozilla/netwerk/base/src: .nsSocketTransport2.cpp.swp
-diff -ur mozilla/netwerk/base/src/nsSocketTransport2.h mozilla/netwerk/base/src/nsSocketTransport2.h
---- mozilla/netwerk/base/src/nsSocketTransport2.h	2008-02-21 12:39:22.000000000 -0800
-+++ mozilla/netwerk/base/src/nsSocketTransport2.h	2008-09-03 15:28:34.000000000 -0700
+diff --git a/netwerk/base/src/nsSocketTransport2.h b/netwerk/base/src/nsSocketTransport2.h
+index de4133f..3b2c177 100644
+--- a/netwerk/base/src/nsSocketTransport2.h
++++ b/netwerk/base/src/nsSocketTransport2.h
 @@ -56,6 +56,8 @@
  #include "nsICancelable.h"
  #include "nsIClassInfo.h"
@@ -361,7 +381,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.h mozilla/netwerk/base/src/
  class nsSocketTransport;
  
  //-----------------------------------------------------------------------------
-@@ -95,6 +97,8 @@
+@@ -95,6 +97,8 @@ private:
  
  //-----------------------------------------------------------------------------
  
@@ -370,7 +390,7 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.h mozilla/netwerk/base/src/
  class nsSocketOutputStream : public nsIAsyncOutputStream
  {
  public:
-@@ -125,6 +129,8 @@
+@@ -125,6 +129,8 @@ private:
      nsCOMPtr<nsIOutputStreamCallback> mCallback;
      PRUint32                          mCallbackFlags;
      nsUint64                          mByteCount;
@@ -379,50 +399,22 @@ diff -ur mozilla/netwerk/base/src/nsSocketTransport2.h mozilla/netwerk/base/src/
  };
  
  //-----------------------------------------------------------------------------
-@@ -224,6 +230,9 @@
+@@ -224,6 +230,10 @@ private:
      nsCOMPtr<nsICancelable> mDNSRequest;
      nsCOMPtr<nsIDNSRecord>  mDNSRecord;
      PRNetAddr               mNetAddr;
 +    bool                    mObfuscation;
 +    struct obstcp_client_ctx mObsContext;
++    struct obstcp_rbuf      mObsRBuf;
 +    struct obstcp_accum     mObsAccum;
  
      // socket methods (these can only be called on the socket thread):
  
-Only in mozilla/netwerk/base/src: .nsSocketTransport2.h.swp
-diff -ur mozilla/nsprpub/pr/include/prio.h mozilla/nsprpub/pr/include/prio.h
---- mozilla/nsprpub/pr/include/prio.h	2004-04-25 08:00:47.000000000 -0700
-+++ mozilla/nsprpub/pr/include/prio.h	2008-08-26 20:16:55.000000000 -0700
-@@ -343,6 +343,7 @@
-     PRIntervalTime timeout);
- typedef PRStatus (PR_CALLBACK *PRConnectFN)(
-     PRFileDesc *fd, const PRNetAddr *addr, PRIntervalTime timeout);
-+typedef PRUint32 (PR_CALLBACK *PRSocketOutQFN)(PRFileDesc *fd);
- typedef PRFileDesc* (PR_CALLBACK *PRAcceptFN) (
-     PRFileDesc *fd, PRNetAddr *addr, PRIntervalTime timeout);
- typedef PRStatus (PR_CALLBACK *PRBindFN)(PRFileDesc *fd, const PRNetAddr *addr);
-@@ -417,7 +418,7 @@
-     PRSendfileFN sendfile;			/* Send a (partial) file with header/trailer*/
-     PRConnectcontinueFN connectcontinue;
-                                     /* Continue a nonblocking connect */
--    PRReservedFN reserved_fn_3;		/* reserved for future use */
-+    void *outq;
-     PRReservedFN reserved_fn_2;		/* reserved for future use */
-     PRReservedFN reserved_fn_1;		/* reserved for future use */
-     PRReservedFN reserved_fn_0;		/* reserved for future use */
-@@ -1253,6 +1254,8 @@
- 
- NSPR_API(PRFileDesc*)    PR_OpenTCPSocket(PRIntn af);
- 
-+NSPR_API(PRUint32) PR_SocketOutQ(PRFileDesc *);
-+
- /*
-  *************************************************************************
-  * FUNCTION: PR_Connect
-diff -ur mozilla/toolkit/library/Makefile.in mozilla/toolkit/library/Makefile.in
---- mozilla/toolkit/library/Makefile.in	2008-05-08 02:20:45.000000000 -0700
-+++ mozilla/toolkit/library/Makefile.in	2008-08-26 18:55:32.000000000 -0700
-@@ -253,3 +253,5 @@
+diff --git a/toolkit/library/Makefile.in b/toolkit/library/Makefile.in
+index 7b00f11..d30494c 100644
+--- a/toolkit/library/Makefile.in
++++ b/toolkit/library/Makefile.in
+@@ -253,3 +253,5 @@ endif
  ifneq (,$(filter layout-debug,$(MOZ_EXTENSIONS)))
  DEFINES += -DMOZ_ENABLE_EXTENSION_LAYOUT_DEBUG
  endif
