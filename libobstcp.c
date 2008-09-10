@@ -9,8 +9,6 @@
 #include <errno.h>
 #include <assert.h>
 
-#include <stdio.h>   // DEBUG ONLY
-
 #include <arpa/inet.h>
 
 #include "libobstcp.h"
@@ -20,22 +18,13 @@
 
 #define EXPORTED __attribute__ ((visibility("default")))
 
-#define min_t(type, x, y) ({			\
-	type __min1 = (x);			\
-	type __min2 = (y);			\
-	__min1 < __min2 ? __min1: __min2; })
+#define min_t(type, x, y) ({                        \
+        type __min1 = (x);                        \
+        type __min2 = (y);                        \
+        __min1 < __min2 ? __min1: __min2; })
 
 extern void curve25519_donna(uint8_t *mypublic, const uint8_t *secret,
                              const uint8_t *basepoint);
-
-static void
-print_bytes(const uint8_t *bytes, unsigned len) {
-  unsigned i;
-
-  for (i = 0; i < len; ++i) {
-    fprintf(stderr, "%02x", bytes[i]);
-  }
-}
 
 // -----------------------------------------------------------------------------
 // Utility functions for reading and writing the banners and adverts...
