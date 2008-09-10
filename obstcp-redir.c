@@ -38,6 +38,7 @@ struct chunk {
 
 struct connection {
   struct obstcp_server_ctx ctx;
+  struct obstcp_rbuf rbuf;
   int fd;
   int outfd;
   struct event obsevent;
@@ -78,6 +79,8 @@ connection_free(struct connection *conn) {
     next = c->next;
     free(c);
   }
+
+  obstcp_rbuf_free(&conn->rbuf);
 
   free(conn);
 }
@@ -234,9 +237,8 @@ connection_obs_cb(int fd, short events, void *arg) {
     if (!c) return;
     memset(c, 0, sizeof(struct chunk));
 
-    char ready;
     const ssize_t n =
-      obstcp_server_read(conn->fd, &conn->ctx, c->data, queued, &ready);
+      obstcp_rbuf_read_fd(&conn->rbuf, conn->fd, c->data, queued);
 
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) return;
@@ -253,16 +255,12 @@ connection_obs_cb(int fd, short events, void *arg) {
       const char was_empty_q = conn->outqhead ? 0 : 1;
 
       conn->outqlen += c->length;
-      if (!ready) {
-        chunk_nq(c, &conn->pendingqhead, &conn->pendingqtail);
-      } else {
-        if (conn->pendingqhead) {
-          chunks_move(&conn->outqhead, &conn->outqtail,
-                      &conn->pendingqhead, &conn->pendingqtail);
-        }
-        chunk_nq(c, &conn->outqhead, &conn->outqtail);
-        if (was_empty_q) if (!connection_out_write(conn)) return;
+      if (conn->pendingqhead) {
+        chunks_move(&conn->outqhead, &conn->outqtail,
+                    &conn->pendingqhead, &conn->pendingqtail);
       }
+      chunk_nq(c, &conn->outqhead, &conn->outqtail);
+      if (was_empty_q) if (!connection_out_write(conn)) return;
     }
   }
 
@@ -366,6 +364,7 @@ accept_cb(int fd, short events, void *arg) {
 
   obstcp_server_ctx_init(&conn->ctx, cfg->keys);
   conn->fd = nfd;
+  obstcp_rbuf_server_init(&conn->rbuf, &conn->ctx);
 
   conn->outfd = socket(PF_INET, SOCK_STREAM, 0);
   if (conn->outfd < 0) {

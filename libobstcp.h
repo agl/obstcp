@@ -13,8 +13,12 @@ extern "C" {
 
 #define PUBLIC __attribute__((visibility("default")))
 
+// Maximum frame prefix size
 #define OBSTCP_MAX_PREFIX 64
-#define OBSTCP_ACCUM_BUFFERS 6
+// Maximum number of payload bytes in a frame
+#define OBSTCP_MAX_FRAME 8192
+// Maximum banner size
+#define OBSTCP_MAX_BANNER 386
 
 // -----------------------------------------------------------------------------
 // struct obstcp_keypair - a public/private key pair
@@ -148,40 +152,33 @@ void PUBLIC obstcp_server_ctx_init(struct obstcp_server_ctx *ctx,
                                    const struct obstcp_keys *keys);
 
 // -----------------------------------------------------------------------------
-// Read from a socket
-// fd: the file descriptor to read from
-// buffer: buffer to write data to
-// len: number of bytes in @buffer
-// ready: (output) on success, this is true if a MAC was successfully
-//   calculated.
+// Process new data from the network
 //
-// Reading from a socket has two phases:
-//   1) setup phase, before key agreement has completed. In this phase this
-//      function with return -1 with errno set to EAGAIN until it has enough
-//      data to complete key agreement.
+// outiov: an array of vectors to put output data in
+// outlen: (in/out) the length (in elements) of @outiov
+// consumed: (output)
+// iniov: an array of vectors of data to process
+// inlen: the length (in elements) of @iniov
+// returns: -1 on error, 0 on success
 //
-//      If key agreement is successful, we move to phase two. Otherwise, we
-//      return -1 and set errno to EPROTO.
+// Input from the network is contained in a series of vectors (@iniov, @inlen).
+// This includes unprocessed data from previous calls. The data pointed to by
+// these vectors may be mutated by this call.
 //
-//   2) In this phase we are reading application data from the socket. It may
-//      be that the data is MAC protected. In this case, the read calls will
-//      return positive byte counts, but *ready will be false on return. Once
-//      the MAC has been read and checked *ready will be true. This means that
-//      all the data since the last time ready returned true is valid and can
-//      be processed. There cannot be > 16K of unready data.
-//
-//      Do not use this for application level framing since MAC may not be in
-//      operation - in this case *ready is always set to true.
-//
-// Otherwise, this call returns like read(2) - i.e. 0 return means EOF etc. One
-// exception is that this call will never return -1 with an errno of EINTR. The
-// socket can be blocking or non-blocking.
+// On successful exit, @outlen contains the number of vectors of processed,
+// ready data in @outiov. @consumed contains the number of bytes from the input
+// vectors that was consumed. Any unconsumed data must be at the head of the
+// input vectors next time that this function is called.
 //
 // If you wish to know if key agreement has completed after calling this
 // function, use obstcp_server_ready.
+//
+// If this function is a pain to use, see the rbuf stuff below.
 // -----------------------------------------------------------------------------
-ssize_t PUBLIC obstcp_server_read(int fd, struct obstcp_server_ctx *ctx,
-                                  uint8_t *buffer, size_t len, char *ready);
+int PUBLIC obstcp_server_read(struct obstcp_server_ctx *ctx,
+                              struct iovec *outiov, unsigned *outlen,
+                              size_t *consumed,
+                              const struct iovec *iniov, unsigned inlen);
 
 // -----------------------------------------------------------------------------
 // Returns true iff key agreement has completed.
@@ -309,15 +306,10 @@ void PUBLIC obstcp_client_banner(struct obstcp_client_ctx *ctx,
 // -----------------------------------------------------------------------------
 // Same as the server version
 // -----------------------------------------------------------------------------
-ssize_t PUBLIC obstcp_client_read(int fd, struct obstcp_client_ctx *ctx,
-                                  uint8_t *buffer, size_t len, char *ready);
-
-// -----------------------------------------------------------------------------
-// FIXME: document
-// -----------------------------------------------------------------------------
-ssize_t PUBLIC obstcp_client_in(struct obstcp_client_ctx *ctx,
-                 uint8_t *buffer, size_t blen, char *ready,
-                 ssize_t (*read) (void *, void *buffer, size_t len), void *ptr);
+int PUBLIC obstcp_client_read(struct obstcp_client_ctx *ctx,
+                              struct iovec *outiov, unsigned *outlen,
+                              size_t *consumed,
+                              const struct iovec *iniov, unsigned inlen);
 
 // -----------------------------------------------------------------------------
 // Same as the server version
@@ -345,6 +337,8 @@ unsigned PUBLIC obstcp_client_frame_payload_sz(const struct obstcp_client_ctx *c
 // what data has been encrypted. If you are writing code from scratch you
 // should be able to avoid using these. However, if you are modifying existing
 // code they may be of use...
+
+#define OBSTCP_ACCUM_BUFFERS 6
 
 struct obstcp_accum_buffer {
   uint16_t payload_len, payload_used;
@@ -414,6 +408,79 @@ void PUBLIC obstcp_accum_prepare(struct obstcp_accum *ac,
 // _prepare, the same thing happens.
 // -----------------------------------------------------------------------------
 ssize_t PUBLIC obstcp_accum_commit(struct obstcp_accum *ac, ssize_t result);
+// -----------------------------------------------------------------------------
+
+
+// -----------------------------------------------------------------------------
+// Read buffers.
+//
+// These are helper functions which use the lower level functions
+// obstcp_[client|server]_read and maintain the queues needed to make
+// everything work like a wrapper around a read(2) like function...
+
+// -----------------------------------------------------------------------------
+// length: the amount of alloced data at @data
+// used: number of bytes written to (<= @length)
+// read: number of bytes consumed (<= @used)
+// -----------------------------------------------------------------------------
+
+struct chunk;
+
+// -----------------------------------------------------------------------------
+// A varbuf is a double-linked list of chunks. We fill the varbuf from the
+// tail. Each chunk is a certain minimum size (VARBUF_CHUNK_SIZE) so that a
+// peer who is feeding us data one byte at a time cannot cause us to alloc huge
+// amount of overhead to keep track of lots of 1 byte buffers.
+// -----------------------------------------------------------------------------
+struct varbuf {
+  struct chunk *head, *tail;
+};
+
+// -----------------------------------------------------------------------------
+// Note that this structure contains pointers to malloced memory, so you must
+// _free it when done.
+// -----------------------------------------------------------------------------
+struct obstcp_rbuf {
+  void *ctx;
+  struct varbuf in, out;
+  char is_server;
+};
+
+// -----------------------------------------------------------------------------
+// Setup and clear an rbuf for a client context
+// -----------------------------------------------------------------------------
+void PUBLIC obstcp_rbuf_client_init(struct obstcp_rbuf *rbuf,
+                                    struct obstcp_client_ctx *ctx);
+
+// -----------------------------------------------------------------------------
+// Setup and clear an rbuf for a server context
+// -----------------------------------------------------------------------------
+void PUBLIC obstcp_rbuf_server_init(struct obstcp_rbuf *rbuf,
+                                    struct obstcp_server_ctx *ctx);
+
+// -----------------------------------------------------------------------------
+// Free all malloced blocks pointed to by @rbuf
+// -----------------------------------------------------------------------------
+void PUBLIC obstcp_rbuf_free(struct obstcp_rbuf *rbuf);
+
+// -----------------------------------------------------------------------------
+// @buffer: (output) a buffer to put the resulting data in
+// @len: number of bytes in @buffer
+// @read: a read function
+// @ctx: the first argument to the read function
+// returns: see read(2)
+// -----------------------------------------------------------------------------
+ssize_t PUBLIC obstcp_rbuf_read
+  (struct obstcp_rbuf *rbuf, uint8_t *buffer, size_t len,
+   ssize_t (*read) (void *ctx, uint8_t *buffer, size_t len), void *ctx);
+
+// -----------------------------------------------------------------------------
+// This is the same as obstcp_rbuf_read, but it uses read(2) to read from the
+// file descriptor.
+// -----------------------------------------------------------------------------
+ssize_t PUBLIC obstcp_rbuf_read_fd(struct obstcp_rbuf *rbuf, int fd,
+                                   uint8_t *buffer, size_t len);
+// -----------------------------------------------------------------------------
 
 #ifdef __cplusplus
 }

@@ -92,6 +92,9 @@ client(uint32_t destip, const char *advert) {
     return 1;
   }
 
+  struct obstcp_rbuf rbuf;
+  obstcp_rbuf_client_init(&rbuf, &ctx);
+
   for (;;) {
     if (epoll_wait(efd, &eev, 1, -1) == -1) {
       perror("epoll_wait");
@@ -129,18 +132,15 @@ client(uint32_t destip, const char *advert) {
         }
       }
     } else {
-      char ready;
       uint8_t buffer[8192];
 
-      const ssize_t n = obstcp_client_read(fd, &ctx, buffer, sizeof(buffer), &ready);
+      const ssize_t n =
+        obstcp_rbuf_read_fd(&rbuf, fd, buffer, sizeof(buffer));
       if (n == 0) {
         fprintf(stderr, "  ** Remote closed\n");
         return 0;
       } else if (n < 0) {
-        perror("obstcp_server_read");
-        return 1;
-      } else if (!ready) {
-        fprintf(stderr, "  ** Non ready data from remote\n");
+        perror("obstcp_rbuf_read_fd");
         return 1;
       } else {
         write(1, buffer, n);

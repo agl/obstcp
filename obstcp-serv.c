@@ -81,13 +81,19 @@ server() {
   struct obstcp_server_ctx ctx;
   obstcp_server_ctx_init(&ctx, &keys);
 
-  char ready;
+  struct obstcp_rbuf rbuf;
+  obstcp_rbuf_server_init(&rbuf, &ctx);
 
   do {
-    const ssize_t n = obstcp_server_read(nfd, &ctx, NULL, 0, &ready);
+    uint8_t b;
+    const ssize_t n = obstcp_rbuf_read_fd(&rbuf, nfd, &b, 1);
     if (n < 0) {
-      perror("reading");
+      perror("obstcp_rbuf_read_fd");
       return 1;
+    } else if (n == 0) {
+      fprintf(stderr, "  * Peer closed connection in handshake\n");
+    } else {
+      write(1, &b, 1);
     }
   } while (!obstcp_server_ready(&ctx));
 
@@ -150,18 +156,14 @@ server() {
         }
       }
     } else {
-      char ready;
       uint8_t buffer[8192];
 
-      const ssize_t n = obstcp_server_read(nfd, &ctx, buffer, sizeof(buffer), &ready);
+      const ssize_t n = obstcp_rbuf_read_fd(&rbuf, nfd, buffer, sizeof(buffer));
       if (n == 0) {
         fprintf(stderr, "  ** Remote closed\n");
         return 0;
       } else if (n < 0) {
-        perror("obstcp_server_read");
-        return 1;
-      } else if (!ready) {
-        fprintf(stderr, "  ** Non ready data from remote\n");
+        perror("obstcp_rbuf_read_fd");
         return 1;
       } else {
         write(1, buffer, n);
