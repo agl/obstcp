@@ -9,349 +9,15 @@
 #include <util_filter.h>
 #include <apr_buckets.h>
 
-#include <libobstcp.h>
+#include "../../libobstcp.h"
+
+#include "../../cursor.h"
+#include "../../iovec_cursor.h"
+#include "../../varbuf.h"
 
 static const char kFilterName[] = "ObsTCP";
 
 module mod_obstcp;
-
-// -----------------------------------------------------------------------------
-// Utility functions for dealing with iovec arrays...
-
-struct iovec_cursor {
-  struct iovec *iov;  // pointer to the iovecs
-  unsigned count;     // number of iovecs
-  unsigned i;         // current iovec
-  size_t j;           // offset into current iovec
-};
-
-static void
-iovec_cursor_init(struct iovec_cursor *c,
-                  struct iovec *iov, unsigned count) {
-  c->iov = iov;
-  c->count = count;
-  c->i = 0;
-  c->j = 0;
-}
-
-static void
-iovec_cursor_debug(const struct iovec_cursor *c) {
-  unsigned i;
-
-  for (i = 0; i < c->count; ++i) {
-    fprintf(stderr, "iovec %u/%u:\n", i, c->count);
-    size_t todo = c->iov[i].iov_len;
-    size_t j = 0;
-
-    while (todo >= 16) {
-      fprintf(stderr, "  ");
-
-      unsigned k;
-      for (k = 0; k < 16; ++k) {
-        fprintf(stderr, "%02x ", ((uint8_t *) c->iov[i].iov_base)[j+k]);
-      }
-      for (k = 0; k < 16; ++k) {
-        fprintf(stderr, "%c", ((uint8_t *) c->iov[i].iov_base)[j++]);
-      }
-      fprintf(stderr, "\n");
-
-      todo -= 16;
-    }
-
-    if (todo) {
-      const size_t origtodo = todo;
-      unsigned k = 0;
-
-      fprintf(stderr, "  ");
-      while (todo--) {
-        fprintf(stderr, "%02x ", ((uint8_t *) c->iov[i].iov_base)[j+(k++)]);
-      }
-      for (k = 0; k < 16 - origtodo; ++k) {
-        fprintf(stderr, "   ");
-      }
-
-      todo = origtodo;
-      k = 0;
-      while (todo--) {
-        fprintf(stderr, "%c ", ((uint8_t *) c->iov[i].iov_base)[j+(k++)]);
-      }
-      fprintf(stderr, "\n");
-    }
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Return true iff the cursor is 'full' (i.e. at the end of the iovec array)
-// -----------------------------------------------------------------------------
-static char
-iovec_cursor_full(struct iovec_cursor *c) {
-  return c->i == c->count;
-};
-
-// -----------------------------------------------------------------------------
-// Get an vector from the current cursor position of, at most, @len bytes.
-// -----------------------------------------------------------------------------
-static void
-iovec_cursor_get(struct iovec *iov, struct iovec_cursor *c, size_t len) {
-  assert(!iovec_cursor_full(c));
-
-  size_t count = c->iov[c->i].iov_len - c->j;
-  if (count > len) count = len;
-
-  iov->iov_base = c->iov[c->i].iov_base + c->j;
-  iov->iov_len = count;
-  c->j += count;
-  if (c->j == c->iov[c->i].iov_len) {
-    c->j = 0;
-    c->i++;
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Find the first occurance of @byte in the data from the current cursor
-// position onwards. If @byte is found, return it's index from the current
-// cursor location. Otherwise, return -1
-// -----------------------------------------------------------------------------
-static ssize_t
-iovec_cursor_memchr(const struct iovec_cursor *c, char byte) {
-  unsigned i;
-  size_t scanned = 0, j = c->j;
-
-  for (i = c->i; i < c->count; ++i) {
-    const void *a = memchr(c->iov[i].iov_base + j, byte, c->iov[i].iov_len - j);
-    if (!a) {
-      j = 0;
-      scanned += c->iov[i].iov_len;
-    } else {
-      return scanned + (a - (c->iov[i].iov_base + j));
-    }
-  }
-
-  return -1;
-}
-
-// -----------------------------------------------------------------------------
-// Get a pointer to the next @n bytes from the cursor in a linear buffer. If
-// the next @n bytes are linear already, return a pointer to the contents of
-// one of the vectors. Otherwise, use @buffer to concatenate the fragments,
-// returning a pointer to @buffer.
-//
-// This assumes that enough data exists in @c to be read. See iovec_cursor_has.
-// -----------------------------------------------------------------------------
-static const uint8_t *
-iovec_cursor_read(uint8_t *buffer, struct iovec_cursor *c, size_t n) {
-  if (c->iov[c->i].iov_len - c->j >= n) {
-    const uint8_t *const result = ((uint8_t *) c->iov[c->i].iov_base) + c->j;
-
-    c->j += n;
-    if (c->j == c->iov[c->i].iov_len) {
-      c->j = 0;
-      c->i++;
-    }
-    return result;
-  } else {
-    off_t j = 0;
-
-    while (n) {
-      size_t todo = c->iov[c->i].iov_len - c->j;
-      if (todo > n)
-        todo = n;
-      memcpy(buffer + j, ((uint8_t *) c->iov[c->i].iov_base) + c->j, todo);
-      n -= todo;
-      j += todo;
-      c->j += todo;
-      if (c->j == c->iov[c->i].iov_len) {
-        c->j = 0;
-        c->i++;
-      }
-    }
-
-    return buffer;
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Advance the current cursor location, at most, @bytes bytes. If the vector
-// array contains >= @bytes bytes, then 0 is returned. Otherwise, the number of
-// remain bytes not advanced over is returned.
-// -----------------------------------------------------------------------------
-static size_t
-iovec_cursor_seek(struct iovec_cursor *c,
-                  size_t bytes) {
-  unsigned i;
-
-  for (i = c->i; i < c->count; ++i) {
-    size_t todo = bytes;
-    if (todo > c->iov[i].iov_len)
-      todo = c->iov[i].iov_len;
-
-    c->j += todo;
-    bytes -= todo;
-
-    if (c->j == c->iov[i].iov_len) {
-      c->j = 0;
-      c->i++;
-    }
-  }
-
-  return bytes;
-}
-// -----------------------------------------------------------------------------
-
-
-// -----------------------------------------------------------------------------
-// Varbuffers. Support functions for read buffers...
-
-#define VARBUF_CHUNK_SIZE 256
-
-struct chunk {
-  size_t length, used, read;
-  struct chunk *prev, *next;
-  uint8_t data[0];
-};
-
-static void
-varbuf_init(struct varbuf *vb) {
-  memset(vb, 0, sizeof(struct varbuf));
-}
-
-static void
-varbuf_free(struct varbuf *vb) {
-  struct chunk *c, *next;
-
-  for (c = vb->head; c; c = next) {
-    next = c->next;
-    free(c);
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Append @len bytes from @buffer to the end of @vb
-// -----------------------------------------------------------------------------
-static int
-varbuf_copy_in(struct varbuf *vb, const uint8_t *buffer, size_t len) {
-  off_t j = 0;
-
-  if (vb->tail) {
-    size_t remaining = vb->tail->length - vb->tail->used;
-    if (remaining > len)
-      remaining = len;
-
-    memcpy(vb->tail->data + vb->tail->used, buffer, remaining);
-    vb->tail->used += remaining;
-    j += remaining;
-    len -= remaining;
-  }
-
-  if (len) {
-    size_t alloc = len;
-    if (alloc < VARBUF_CHUNK_SIZE)
-      alloc = VARBUF_CHUNK_SIZE;
-
-    struct chunk *const chunk = malloc(sizeof(struct chunk) + alloc);
-    if (!chunk) {
-      errno = ENOMEM;
-      return -1;
-    }
-
-    chunk->length = alloc;
-    chunk->used = len;
-    chunk->read = 0;
-    chunk->next = NULL;
-    chunk->prev = vb->tail;
-    if (vb->tail) {
-      vb->tail->next = chunk;
-      vb->tail = chunk;
-    } else {
-      vb->tail = vb->head = chunk;
-    }
-
-    memcpy(chunk->data, buffer + j, len);
-  }
-
-  return 0;
-}
-
-// -----------------------------------------------------------------------------
-// Fillout a vector array with the unread contents of a varbuf
-//
-// iovecs: (output) these are filled out with vectors of unread data
-// oiovlen: (in/out) on entry, the number of elements of @iovecs. On exist, the
-//   number of valid entries in @iovecs
-// -----------------------------------------------------------------------------
-static void
-varbuf_to_iov(struct iovec *iovecs, unsigned *oiovlen, struct varbuf *vb) {
-  const unsigned iovlen = *oiovlen;
-  unsigned i = 0;
-  struct chunk *c;
-
-  for (c = vb->head; c && i < iovlen; c = c->next) {
-    iovecs[i].iov_base = c->data + c->read;
-    iovecs[i++].iov_len = c->used - c->read;
-  }
-
-  *oiovlen = i;
-}
-
-// -----------------------------------------------------------------------------
-// Return the number of chunks in a varbuf
-// -----------------------------------------------------------------------------
-static unsigned
-varbuf_count(const struct varbuf *vb) {
-  unsigned count = 0;
-  const struct chunk *c;
-
-  for (c = vb->head; c; c = c->next)
-    count++;
-
-  return count;
-}
-
-// -----------------------------------------------------------------------------
-// Copy everything from @c to the end of @vb
-// -----------------------------------------------------------------------------
-static int
-varbuf_copy_iovec_cursor(struct varbuf *vb, struct iovec_cursor *c) {
-  while (!iovec_cursor_full(c)) {
-    struct iovec iov;
-    iovec_cursor_get(&iov, c, 999999999999l);
-    if (varbuf_copy_in(vb, iov.iov_base, iov.iov_len) == -1)
-      return -1;
-  }
-
-  return 0;
-}
-
-// -----------------------------------------------------------------------------
-// Discard, at most, @n bytes from a varbuf and return @n, less the number of
-// bytes actually discarded. (If the return value is > 0, then @vb is empty on
-// exit.)
-// -----------------------------------------------------------------------------
-static size_t
-varbuf_discard(struct varbuf *vb, size_t n) {
-  struct chunk *c, *next;
-
-  for (c = vb->head; c && n; c = next) {
-    next = c->next;
-    size_t todo = n;
-    if (todo > c->used - c->read)
-      todo = c->used - c->read;
-
-    c->read += todo;
-    n -= todo;
-
-    if (c->read == c->used) {
-      vb->head = next;
-      if (!next)
-        vb->tail = NULL;
-      free(c);
-    }
-  }
-
-  return n;
-}
-// -----------------------------------------------------------------------------
-
 
 // -----------------------------------------------------------------------------
 // This is a per-server configuration for obstcp
@@ -419,15 +85,122 @@ mod_obstcp_pre_connection(conn_rec *c) {
   fflush(stderr);
 }
 
+struct bucket_cursor {
+  struct obstcp_cursor c;
+  apr_bucket *b;
+  apr_bucket_brigade *bb;
+  size_t read;
+  ap_input_mode_t mode;
+  char seen_eof;
+  apr_status_t status;
+};
+
+static int
+bucket_cursor_get(void *arg, struct iovec *iov, size_t n) {
+  struct bucket_cursor *c = arg;
+
+  for (;;) {
+    if (c->b == APR_BRIGADE_SENTINEL(c->bb))
+      return 0;
+
+    if (APR_BUCKET_IS_EOS(c->b)) {
+      c->seen_eof = 1;
+      c->read = 0;
+      c->b = APR_BUCKET_NEXT(c->b);
+      continue;
+    } else if (APR_BUCKET_IS_METADATA(c->b)) {
+      c->read = 0;
+      c->b = APR_BUCKET_NEXT(c->b);
+      continue;
+    }
+
+    const char *data;
+    apr_size_t len;
+    apr_status_t r = apr_bucket_read(c->b, &data, &len, c->mode);
+    if (r != APR_SUCCESS) {
+      c->status = r;
+      return 0;
+    }
+    const apr_size_t origlen = len;
+
+    data += c->read;
+    len -= c->read;
+
+    if (len > n)
+      len = n;
+
+    // I'm assuming that the input buckets are mutable here.
+    iov->iov_base = (uint8_t *) data;
+    iov->iov_len = len;
+
+    c->read += len;
+    if (c->read == origlen) {
+      c->read = 0;
+      c->b = APR_BUCKET_NEXT(c->b);
+    }
+
+    return 1;
+  }
+}
+
+static int
+bucket_cursor_fold(void *arg, int (*f) (void *, uint8_t *, size_t len), void *ctx) {
+  struct bucket_cursor *c = arg;
+  apr_bucket *b = c->b;
+
+  for (;;) {
+    if (b == APR_BRIGADE_SENTINEL(c->bb))
+      return 0;
+
+    if (APR_BUCKET_IS_EOS(b) ||
+        APR_BUCKET_IS_METADATA(b)) {
+      b = APR_BUCKET_NEXT(b);
+      continue;
+    }
+
+    const char *data;
+    apr_size_t len;
+    apr_status_t r = apr_bucket_read(c->b, &data, &len, c->mode);
+    if (r != APR_SUCCESS) {
+      c->status = r;
+      return 0;
+    }
+
+    if (b == c->b) {
+      data += c->read;
+      len -= c->read;
+    }
+
+    int n = f(ctx, (uint8_t *) data, len);
+    if (n)
+      return n;
+
+    b = APR_BUCKET_NEXT(b);
+  }
+}
+
+static void
+bucket_cursor_init(struct bucket_cursor *c, apr_bucket_brigade *bb,
+                   ap_input_mode_t mode) {
+  c->c.get = bucket_cursor_get;
+  c->c.fold = bucket_cursor_fold;
+  c->b = APR_BRIGADE_FIRST(bb);
+  c->bb = bb;
+  c->read = 0;
+  c->seen_eof = 0;
+  c->mode = mode;
+  c->status = APR_SUCCESS;
+}
+
 static apr_status_t
 mod_obstcp_obuf_use(apr_bucket_brigade *bb, size_t *oconsumed,
-                    struct iovec_cursor *c, ap_input_mode_t mode, apr_off_t bytes,
+                    struct obstcp_cursor *c, ap_input_mode_t mode, apr_off_t bytes,
                     apr_bucket_alloc_t *alloc) {
   size_t consumed = 0;
   *oconsumed = 0;
 
   if (mode == AP_MODE_GETLINE) {
-    const ssize_t lineoffset = iovec_cursor_memchr(c, '\n');
+    const ssize_t lineoffset = cursor_memchr(c, '\n');
     if (lineoffset == -1)
       return APR_SUCCESS;
 
@@ -435,7 +208,7 @@ mod_obstcp_obuf_use(apr_bucket_brigade *bb, size_t *oconsumed,
     if (!line)
       return APR_ENOMEM;
 
-    const uint8_t *a = iovec_cursor_read(line, c, lineoffset + 1);
+    const uint8_t *a = cursor_read(line, c, lineoffset + 1);
     if (a != line)
       memcpy(line, a, lineoffset + 1);
 
@@ -448,10 +221,12 @@ mod_obstcp_obuf_use(apr_bucket_brigade *bb, size_t *oconsumed,
     APR_BRIGADE_INSERT_TAIL(bb, outb);
     consumed += lineoffset + 1;
   } else if (mode == AP_MODE_READBYTES) {
-    while (bytes && !iovec_cursor_full(c)) {
+    while (bytes) {
       struct iovec iov;
 
-      iovec_cursor_get(&iov, c, bytes);
+      if (!c->get(c, &iov, bytes))
+        break;
+
       fprintf(stderr, "mod_obstcp: emitting %zu bytes", iov.iov_len);
       apr_bucket *outb = apr_bucket_heap_create(iov.iov_base, iov.iov_len,
                                                 NULL, alloc);
@@ -483,35 +258,22 @@ mod_obstcp_io_filter_input(ap_filter_t *f, apr_bucket_brigade *bb,
     return APR_ENOTIMPL;
   }
 
-  // See if we can satisfy this request from buffers
-  {
-    const unsigned obufvectors = varbuf_count(&conn->obuf);
+  // See if we can satisfy this request from buffers. We build a cursor over
+  // our buffered output data.
+  struct varbuf_cursor obufc;
+  varbuf_cursor_init(&obufc, &conn->obuf, NULL, 0);
+  size_t consumed;
 
-    if (obufvectors) {
-      struct iovec *iovs = malloc(sizeof(struct iovec) * obufvectors);
-      if (!iovs)
-        return APR_ENOMEM;
-      unsigned iovlen = obufvectors;
+  ret = mod_obstcp_obuf_use(bb, &consumed, (struct obstcp_cursor *) &obufc,
+                            mode, bytes, f->c->bucket_alloc);
+  if (ret != APR_SUCCESS)
+    return ret;
 
-      varbuf_to_iov(iovs, &iovlen, &conn->obuf);
+  bytes -= consumed;
 
-      struct iovec_cursor c;
-      iovec_cursor_init(&c, iovs, iovlen);
-      size_t consumed;
-
-      ret = mod_obstcp_obuf_use(bb, &consumed, &c, mode, bytes, f->c->bucket_alloc);
-      free(iovs);
-      if (ret != APR_SUCCESS)
-        return ret;
-
-      varbuf_discard(&conn->obuf, consumed);
-      bytes -= consumed;
-
-      if ((mode == AP_MODE_GETLINE && consumed) ||
-          (mode == AP_MODE_READBYTES && !bytes))
-        return APR_SUCCESS;
-    }
-  }
+  if ((mode == AP_MODE_GETLINE && consumed) ||
+      (mode == AP_MODE_READBYTES && !bytes))
+    return APR_SUCCESS;
 
   if (!conn->bb) {
     conn->bb = apr_brigade_create(f->c->pool, f->c->bucket_alloc);
@@ -520,7 +282,6 @@ mod_obstcp_io_filter_input(ap_filter_t *f, apr_bucket_brigade *bb,
   }
 
   char eof_seen = 0, firstloop = 1;
-  size_t consumed;
   apr_bucket *b;
 
   do {
@@ -541,95 +302,54 @@ mod_obstcp_io_filter_input(ap_filter_t *f, apr_bucket_brigade *bb,
 
     firstloop = 0;
 
-    unsigned buckets = 0;
+    struct iovec outiov[16];
+    unsigned outlen = 16;
 
-    for (b = APR_BRIGADE_FIRST(conn->bb);
-         b != APR_BRIGADE_SENTINEL(conn->bb);
-         b = APR_BUCKET_NEXT(b)) {
-      if (APR_BUCKET_IS_EOS(b) ||
-          APR_BUCKET_IS_METADATA(b))
-        continue;
-      buckets++;
-    }
+    // The input to obstcp_server_read is the buffered (unprocessed) input plus
+    // the data from furthur down the stack.
+    struct varbuf_cursor rbufc;
+    varbuf_cursor_init(&rbufc, &conn->rbuf, NULL, 0);
+    struct bucket_cursor bucketc;
+    bucket_cursor_init(&bucketc, conn->bb, mode);
+    struct cursor_join jointc;
+    cursor_join_init(&jointc, (struct obstcp_cursor *) &obufc, (struct obstcp_cursor *) &bucketc);
 
-    const unsigned max_iov =
-      buckets + ((OBSTCP_MAX_FRAME + VARBUF_CHUNK_SIZE) / VARBUF_CHUNK_SIZE);
-    struct iovec *iniov = malloc(sizeof(struct iovec) * max_iov);
-    if (!iniov)
-      return APR_ENOMEM;
-    struct iovec *outiov = malloc(sizeof(struct iovec) * max_iov);
-    if (!outiov) {
-      free(iniov);
-      return APR_ENOMEM;
-    }
-
-    unsigned inlen = max_iov;
-    varbuf_to_iov(iniov, &inlen, &conn->rbuf);
-    unsigned outlen = max_iov;
-
-    for (b = APR_BRIGADE_FIRST(conn->bb);
-         b != APR_BRIGADE_SENTINEL(conn->bb);
-         b = APR_BUCKET_NEXT(b)) {
-      if (APR_BUCKET_IS_EOS(b) ||
-          APR_BUCKET_IS_METADATA(b)) {
-        APR_BUCKET_REMOVE(b);
-        APR_BRIGADE_INSERT_TAIL(bb, b);
-        if (APR_BUCKET_IS_EOS(b))
-          eof_seen = 1;
-        continue;
-      }
-
-      const char *data;
-      apr_size_t len;
-      r = apr_bucket_read(b, &data, &len, mode);
-      if (r != APR_SUCCESS) {
-        ret = r;
-        free(iniov);
-        free(outiov);
-        goto exit;
-      }
-
-      // I'm assuming that the input buckets are mutable here.
-      iniov[inlen].iov_base = (uint8_t *) data;
-      iniov[inlen++].iov_len = len;
-    }
-
-
-    if (obstcp_server_read(&conn->ctx, outiov, &outlen, &consumed, iniov, inlen) == -1) {
+    if (obstcp_server_read(&conn->ctx, outiov, &outlen, &consumed,
+                           (struct obstcp_cursor *) &jointc) == -1) {
       perror("obstcp_server_read");
       ret = APR_ECONNABORTED;
-      free(iniov);
-      free(outiov);
       goto exit;
     }
 
-    // Delete the buffer input data which has now been consumed and, possibly,
-    // buffer some of the extra data that wasn't consumed.
-    varbuf_discard(&conn->rbuf, consumed);
+    // We want to buffer the input data that wasn't consumed. However, the
+    // joint cursor might be pointing within the data that we've already
+    // buffered, we don't want to buffer that data again so we make sure that
+    // we've skipped the whole varbuf_cursor...
+    cursor_join_discard_first(&jointc);
+    // ... and then buffer the rest
+    if (!varbuf_copy_cursor(&conn->rbuf, (struct obstcp_cursor *) &jointc)) {
+      ret = APR_ENOMEM;
+      goto exit;
+    }
 
-    struct iovec_cursor inc;
-    iovec_cursor_init(&inc, iniov, inlen);
-    iovec_cursor_seek(&inc, consumed);
+    // Now we see if we can satisfy this request using the buffered output data
+    // and the new output data from obstcp_server_read
+    varbuf_cursor_init(&obufc, &conn->obuf, NULL, 0);
+    struct iovec_cursor iovc;
+    iovec_cursor_init(&iovc, outiov, outlen);
+    cursor_join_init(&jointc, (struct obstcp_cursor *) &obufc, (struct obstcp_cursor *) &iovc);
 
-    varbuf_copy_iovec_cursor(&conn->rbuf, &inc);
+    ret = mod_obstcp_obuf_use(bb, &consumed, (struct obstcp_cursor *) &jointc,
+                              mode, bytes, f->c->bucket_alloc);
+    // Again, make sure that we aren't going to buffer data that we've already
+    // buffered...
+    cursor_join_discard_first(&jointc);
+    // ... and then buffer the rest...
+    if (!varbuf_copy_cursor(&conn->obuf, (struct obstcp_cursor *) &jointc)) {
+      ret = APR_ENOMEM;
+      goto exit;
+    }
 
-    const unsigned numprocessed = outlen + varbuf_count(&conn->obuf);
-    unsigned processedlen = numprocessed;
-    struct iovec *processediov = malloc(sizeof(struct iovec) * processedlen);
-    varbuf_to_iov(processediov, &processedlen, &conn->obuf);
-    memcpy(processediov + processedlen, outiov, outlen * sizeof(struct iovec));
-
-    struct iovec_cursor processedc;
-    iovec_cursor_init(&processedc, processediov, numprocessed);
-
-    ret = mod_obstcp_obuf_use(bb, &consumed, &processedc, mode, bytes, f->c->bucket_alloc);
-    const ssize_t remaining = varbuf_discard(&conn->obuf, consumed);
-
-    struct iovec_cursor outc;
-    iovec_cursor_init(&outc, outiov, outlen);
-    iovec_cursor_seek(&outc, remaining);
-
-    varbuf_copy_iovec_cursor(&conn->obuf, &outc);
     bytes -= consumed;
 
     for (b = APR_BRIGADE_FIRST(conn->bb);
@@ -637,9 +357,6 @@ mod_obstcp_io_filter_input(ap_filter_t *f, apr_bucket_brigade *bb,
          b = APR_BUCKET_NEXT(b)) {
       apr_bucket_delete(b);
     }
-
-    free(iniov);
-    free(outiov);
   } while (ret == APR_SUCCESS && !eof_seen && block == APR_BLOCK_READ &&
            ((mode == AP_MODE_GETLINE && !consumed) ||
             (mode == AP_MODE_READBYTES && bytes)));

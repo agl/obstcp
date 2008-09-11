@@ -42,14 +42,16 @@ struct obstcp_cursor {
   // and return a vector to it in @iov. It should be assemble fragments to make
   // a linear buffer of @n bytes. It should advance its state so that future
   // get calls return successive buffers. On EOF, iov.iov_len should be 0 and
-  // the function should return 0.
+  // the function should return 0, even if @n is 0.
   // ---------------------------------------------------------------------------
   int (*get) (void *cursor, struct iovec *iov, size_t n);
 
   // ---------------------------------------------------------------------------
-  // Return true iff there are, at least, @n bytes availible
+  // Call a function for each block of memory in the cursor, without moving the
+  // current location of the cursor. If @f returns non-zero, stop the iteration
+  // there and return that value. If the fold completes, return 0.
   // ---------------------------------------------------------------------------
-  int (*has) (void *cursor, size_t n);
+  int (*fold) (void *cursor, int (*f) (void *, uint8_t *, size_t len), void *arg);
 };
 
 // -----------------------------------------------------------------------------
