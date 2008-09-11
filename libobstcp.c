@@ -297,6 +297,8 @@ iovec_cursor_has(const struct iovec_cursor *c, size_t n) {
     } else {
       found += c->iov[i].iov_len;
     }
+
+    i++;
   }
 
   return found >= n;
