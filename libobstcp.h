@@ -21,6 +21,38 @@ extern "C" {
 #define OBSTCP_MAX_BANNER 386
 
 // -----------------------------------------------------------------------------
+// This is a generic cursor. It's used in the read functions for when clients
+// will need to pass in a buffer that they are maintaining. Clients may choose
+// to implement this in a fixed size buffer, or dynamically etc.
+//
+// This would be a iovec[], but translating from the native list structures
+// (bucket brigades in Apache, varbufs in this code etc) was a pain, thus this
+// abstraction.
+// -----------------------------------------------------------------------------
+struct obstcp_cursor {
+  // ---------------------------------------------------------------------------
+  // This function is called with:
+  // cursor: a pointer to the struct obstcp_cursor. Usually this will be casted
+  //   to reveal a larger structure
+  // iov: this should be filled out to point to an array of @n, or less, bytes.
+  // n: the number of bytes requested
+  // returns: 0 on eof.
+  //
+  // This function should get the next, contiguous, span of at most @n bytes
+  // and return a vector to it in @iov. It should be assemble fragments to make
+  // a linear buffer of @n bytes. It should advance its state so that future
+  // get calls return successive buffers. On EOF, iov.iov_len should be 0 and
+  // the function should return 0.
+  // ---------------------------------------------------------------------------
+  int (*get) (void *cursor, struct iovec *iov, size_t n);
+
+  // ---------------------------------------------------------------------------
+  // Return true iff there are, at least, @n bytes availible
+  // ---------------------------------------------------------------------------
+  int (*has) (void *cursor, size_t n);
+};
+
+// -----------------------------------------------------------------------------
 // struct obstcp_keypair - a public/private key pair
 // keyid: the 32-bit xor folding of the public key
 // -----------------------------------------------------------------------------
@@ -157,13 +189,12 @@ void PUBLIC obstcp_server_ctx_init(struct obstcp_server_ctx *ctx,
 // outiov: an array of vectors to put output data in
 // outlen: (in/out) the length (in elements) of @outiov
 // consumed: (output)
-// iniov: an array of vectors of data to process
-// inlen: the length (in elements) of @iniov
+// in: a cursor of data from the network.
 // returns: -1 on error, 0 on success
 //
-// Input from the network is contained in a series of vectors (@iniov, @inlen).
-// This includes unprocessed data from previous calls. The data pointed to by
-// these vectors may be mutated by this call.
+// Input from the network is contained in a cursor.  This includes unprocessed
+// data from previous calls. The data pointed to by these vectors may be
+// mutated by this call.
 //
 // On successful exit, @outlen contains the number of vectors of processed,
 // ready data in @outiov. @consumed contains the number of bytes from the input
@@ -178,7 +209,7 @@ void PUBLIC obstcp_server_ctx_init(struct obstcp_server_ctx *ctx,
 int PUBLIC obstcp_server_read(struct obstcp_server_ctx *ctx,
                               struct iovec *outiov, unsigned *outlen,
                               size_t *consumed,
-                              const struct iovec *iniov, unsigned inlen);
+                              struct obstcp_cursor *in);
 
 // -----------------------------------------------------------------------------
 // Returns true iff key agreement has completed.
@@ -309,7 +340,7 @@ void PUBLIC obstcp_client_banner(struct obstcp_client_ctx *ctx,
 int PUBLIC obstcp_client_read(struct obstcp_client_ctx *ctx,
                               struct iovec *outiov, unsigned *outlen,
                               size_t *consumed,
-                              const struct iovec *iniov, unsigned inlen);
+                              struct obstcp_cursor *c);
 
 // -----------------------------------------------------------------------------
 // Same as the server version
