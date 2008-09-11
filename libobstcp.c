@@ -1102,6 +1102,7 @@ varbuf_copy_in(struct varbuf *vb, const uint8_t *buffer, size_t len) {
       remaining = len;
 
     memcpy(vb->tail->data + vb->tail->used, buffer, remaining);
+    vb->tail->used += remaining;
     j += remaining;
     len -= remaining;
   }
@@ -1123,6 +1124,7 @@ varbuf_copy_in(struct varbuf *vb, const uint8_t *buffer, size_t len) {
     chunk->next = NULL;
     chunk->prev = vb->tail;
     if (vb->tail) {
+      vb->tail->next = chunk;
       vb->tail = chunk;
     } else {
       vb->tail = vb->head = chunk;
