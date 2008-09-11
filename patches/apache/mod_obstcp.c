@@ -34,6 +34,52 @@ iovec_cursor_init(struct iovec_cursor *c,
   c->j = 0;
 }
 
+static void
+iovec_cursor_debug(const struct iovec_cursor *c) {
+  unsigned i;
+
+  for (i = 0; i < c->count; ++i) {
+    fprintf(stderr, "iovec %u/%u:\n", i, c->count);
+    size_t todo = c->iov[i].iov_len;
+    size_t j = 0;
+
+    while (todo >= 16) {
+      fprintf(stderr, "  ");
+
+      unsigned k;
+      for (k = 0; k < 16; ++k) {
+        fprintf(stderr, "%02x ", ((uint8_t *) c->iov[i].iov_base)[j+k]);
+      }
+      for (k = 0; k < 16; ++k) {
+        fprintf(stderr, "%c", ((uint8_t *) c->iov[i].iov_base)[j++]);
+      }
+      fprintf(stderr, "\n");
+
+      todo -= 16;
+    }
+
+    if (todo) {
+      const size_t origtodo = todo;
+      unsigned k = 0;
+
+      fprintf(stderr, "  ");
+      while (todo--) {
+        fprintf(stderr, "%02x ", ((uint8_t *) c->iov[i].iov_base)[j+(k++)]);
+      }
+      for (k = 0; k < 16 - origtodo; ++k) {
+        fprintf(stderr, "   ");
+      }
+
+      todo = origtodo;
+      k = 0;
+      while (todo--) {
+        fprintf(stderr, "%c ", ((uint8_t *) c->iov[i].iov_base)[j+(k++)]);
+      }
+      fprintf(stderr, "\n");
+    }
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Return true iff the cursor is 'full' (i.e. at the end of the iovec array)
 // -----------------------------------------------------------------------------
@@ -61,6 +107,11 @@ iovec_cursor_get(struct iovec *iov, struct iovec_cursor *c, size_t len) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Find the first occurance of @byte in the data from the current cursor
+// position onwards. If @byte is found, return it's index from the current
+// cursor location. Otherwise, return -1
+// -----------------------------------------------------------------------------
 static ssize_t
 iovec_cursor_memchr(const struct iovec_cursor *c, char byte) {
   unsigned i;
@@ -118,6 +169,12 @@ iovec_cursor_read(uint8_t *buffer, struct iovec_cursor *c, size_t n) {
     return buffer;
   }
 }
+
+// -----------------------------------------------------------------------------
+// Advance the current cursor location, at most, @bytes bytes. If the vector
+// array contains >= @bytes bytes, then 0 is returned. Otherwise, the number of
+// remain bytes not advanced over is returned.
+// -----------------------------------------------------------------------------
 static size_t
 iovec_cursor_seek(struct iovec_cursor *c,
                   size_t bytes) {
@@ -181,6 +238,7 @@ varbuf_copy_in(struct varbuf *vb, const uint8_t *buffer, size_t len) {
       remaining = len;
 
     memcpy(vb->tail->data + vb->tail->used, buffer, remaining);
+    vb->tail->used += remaining;
     j += remaining;
     len -= remaining;
   }
@@ -202,6 +260,7 @@ varbuf_copy_in(struct varbuf *vb, const uint8_t *buffer, size_t len) {
     chunk->next = NULL;
     chunk->prev = vb->tail;
     if (vb->tail) {
+      vb->tail->next = chunk;
       vb->tail = chunk;
     } else {
       vb->tail = vb->head = chunk;
@@ -234,6 +293,9 @@ varbuf_to_iov(struct iovec *iovecs, unsigned *oiovlen, struct varbuf *vb) {
   *oiovlen = i;
 }
 
+// -----------------------------------------------------------------------------
+// Return the number of chunks in a varbuf
+// -----------------------------------------------------------------------------
 static unsigned
 varbuf_count(const struct varbuf *vb) {
   unsigned count = 0;
@@ -261,7 +323,7 @@ varbuf_copy_iovec_cursor(struct varbuf *vb, struct iovec_cursor *c) {
 }
 
 // -----------------------------------------------------------------------------
-// Discard, at most, @n bytes from a varbuf and return @n less the number of
+// Discard, at most, @n bytes from a varbuf and return @n, less the number of
 // bytes actually discarded. (If the return value is > 0, then @vb is empty on
 // exit.)
 // -----------------------------------------------------------------------------
@@ -305,7 +367,8 @@ struct mod_obstcp_config {
 struct mod_obstcp_conn {
   apr_bucket_brigade *bb;
   struct obstcp_server_ctx ctx;
-  struct varbuf rbuf, obuf;
+  struct varbuf rbuf;  // contains unprocess input from the network
+  struct varbuf obuf;  // contains processed data ready to go up the stack
 };
 
 // -----------------------------------------------------------------------------
@@ -343,14 +406,11 @@ mod_obstcp_pre_connection(conn_rec *c) {
 
   struct mod_obstcp_conn *conn = apr_pcalloc(c->pool, sizeof(struct mod_obstcp_conn));
   obstcp_server_ctx_init(&conn->ctx, &config->keys);
-  fprintf(stderr, "mod_obstcp: creating connection ctx with key %p\n",
-          config->keys.keys);
   varbuf_init(&conn->rbuf);
   varbuf_init(&conn->obuf);
 
   apr_pool_cleanup_register(c->pool, conn, mod_obstcp_conn_free, apr_pool_cleanup_null);
 
-  fprintf(stderr, "OBSTCP: registering filters\n");
   ap_filter_t *s = ap_add_output_filter(kFilterName, conn, NULL, c);
   fprintf(stderr, "  output: %p\n", s);
   s = ap_add_input_filter(kFilterName, conn, NULL, c);
@@ -379,6 +439,10 @@ mod_obstcp_obuf_use(apr_bucket_brigade *bb, size_t *oconsumed,
     if (a != line)
       memcpy(line, a, lineoffset + 1);
 
+    fprintf(stderr, "mod_obstcp: emitting line: ");
+    fflush(stderr);
+    write(2, line, lineoffset + 1);
+
     apr_bucket *outb = apr_bucket_heap_create((char *) line, lineoffset + 1,
                                               free, alloc);
     APR_BRIGADE_INSERT_TAIL(bb, outb);
@@ -388,6 +452,7 @@ mod_obstcp_obuf_use(apr_bucket_brigade *bb, size_t *oconsumed,
       struct iovec iov;
 
       iovec_cursor_get(&iov, c, bytes);
+      fprintf(stderr, "mod_obstcp: emitting %zu bytes", iov.iov_len);
       apr_bucket *outb = apr_bucket_heap_create(iov.iov_base, iov.iov_len,
                                                 NULL, alloc);
       APR_BRIGADE_INSERT_TAIL(bb, outb);
@@ -411,6 +476,12 @@ mod_obstcp_io_filter_input(ap_filter_t *f, apr_bucket_brigade *bb,
                            apr_off_t bytes) {
   struct mod_obstcp_conn *conn = f->ctx;
   apr_status_t ret = APR_SUCCESS;
+
+  if (mode != AP_MODE_READBYTES && mode != AP_MODE_GETLINE) {
+    fprintf(stderr, "mod_obstcp: ENOTIMPL for mode %d\n", mode);
+    fflush(stderr);
+    return APR_ENOTIMPL;
+  }
 
   // See if we can satisfy this request from buffers
   {
@@ -448,91 +519,130 @@ mod_obstcp_io_filter_input(ap_filter_t *f, apr_bucket_brigade *bb,
     ap_assert(APR_BRIGADE_EMPTY(conn->bb));
   }
 
-  apr_status_t r;
-  if (mode == AP_MODE_GETLINE) {
-    r = ap_get_brigade(f->next, conn->bb, AP_MODE_SPECULATIVE, block, 8192);
-  } else {
-    r = ap_get_brigade(f->next, conn->bb, mode, block, bytes + OBSTCP_MAX_PREFIX);
-  }
-
-  if (r != APR_SUCCESS)
-    return r;
-
+  char eof_seen = 0, firstloop = 1;
+  size_t consumed;
   apr_bucket *b;
-  unsigned buckets = 0;
 
-  for (b = APR_BRIGADE_FIRST(conn->bb);
-       b != APR_BRIGADE_SENTINEL(conn->bb);
-       b = APR_BUCKET_NEXT(b)) {
-    if (APR_BUCKET_IS_EOS(b) ||
-        APR_BUCKET_IS_METADATA(b))
-      continue;
-    buckets++;
-  }
-
-  const unsigned max_iov =
-    buckets + ((OBSTCP_MAX_FRAME + VARBUF_CHUNK_SIZE) / VARBUF_CHUNK_SIZE);
-  struct iovec *iniov = malloc(sizeof(struct iovec) * max_iov);
-  if (!iniov)
-    return APR_ENOMEM;
-  struct iovec *outiov = malloc(sizeof(struct iovec) * max_iov);
-  if (!outiov) {
-    free(iniov);
-    return APR_ENOMEM;
-  }
-  unsigned inlen = max_iov;
-
-  varbuf_to_iov(iniov, &inlen, &conn->rbuf);
-
-  for (b = APR_BRIGADE_FIRST(conn->bb);
-       b != APR_BRIGADE_SENTINEL(conn->bb);
-       b = APR_BUCKET_NEXT(b)) {
-    if (APR_BUCKET_IS_EOS(b) ||
-        APR_BUCKET_IS_METADATA(b)) {
-      APR_BUCKET_REMOVE(b);
-      APR_BRIGADE_INSERT_TAIL(bb, b);
-      continue;
+  do {
+    apr_status_t r;
+    if (block == APR_BLOCK_READ && !firstloop) {
+      r = ap_get_brigade(f->next, conn->bb, AP_MODE_READBYTES, APR_BLOCK_READ, 1);
+      firstloop = 1;
+    } else {
+      r = ap_get_brigade(f->next, conn->bb, AP_MODE_READBYTES, APR_NONBLOCK_READ, 8192);
+      if (APR_STATUS_IS_EAGAIN(r) && block == APR_BLOCK_READ) {
+        firstloop = 0;
+        continue;
+      }
     }
 
-    const char *data;
-    apr_size_t len;
-    r = apr_bucket_read(b, &data, &len, mode);
-    if (r != APR_SUCCESS) {
-      ret = r;
+    if (r != APR_SUCCESS)
+      return r;
+
+    firstloop = 0;
+
+    unsigned buckets = 0;
+
+    for (b = APR_BRIGADE_FIRST(conn->bb);
+         b != APR_BRIGADE_SENTINEL(conn->bb);
+         b = APR_BUCKET_NEXT(b)) {
+      if (APR_BUCKET_IS_EOS(b) ||
+          APR_BUCKET_IS_METADATA(b))
+        continue;
+      buckets++;
+    }
+
+    const unsigned max_iov =
+      buckets + ((OBSTCP_MAX_FRAME + VARBUF_CHUNK_SIZE) / VARBUF_CHUNK_SIZE);
+    struct iovec *iniov = malloc(sizeof(struct iovec) * max_iov);
+    if (!iniov)
+      return APR_ENOMEM;
+    struct iovec *outiov = malloc(sizeof(struct iovec) * max_iov);
+    if (!outiov) {
+      free(iniov);
+      return APR_ENOMEM;
+    }
+
+    unsigned inlen = max_iov;
+    varbuf_to_iov(iniov, &inlen, &conn->rbuf);
+    unsigned outlen = max_iov;
+
+    for (b = APR_BRIGADE_FIRST(conn->bb);
+         b != APR_BRIGADE_SENTINEL(conn->bb);
+         b = APR_BUCKET_NEXT(b)) {
+      if (APR_BUCKET_IS_EOS(b) ||
+          APR_BUCKET_IS_METADATA(b)) {
+        APR_BUCKET_REMOVE(b);
+        APR_BRIGADE_INSERT_TAIL(bb, b);
+        if (APR_BUCKET_IS_EOS(b))
+          eof_seen = 1;
+        continue;
+      }
+
+      const char *data;
+      apr_size_t len;
+      r = apr_bucket_read(b, &data, &len, mode);
+      if (r != APR_SUCCESS) {
+        ret = r;
+        free(iniov);
+        free(outiov);
+        goto exit;
+      }
+
+      // I'm assuming that the input buckets are mutable here.
+      iniov[inlen].iov_base = (uint8_t *) data;
+      iniov[inlen++].iov_len = len;
+    }
+
+
+    if (obstcp_server_read(&conn->ctx, outiov, &outlen, &consumed, iniov, inlen) == -1) {
+      perror("obstcp_server_read");
+      ret = APR_ECONNABORTED;
+      free(iniov);
+      free(outiov);
       goto exit;
     }
 
-    // I'm assuming that the input buckets are mutable here.
-    iniov[inlen].iov_base = (uint8_t *) data;
-    iniov[inlen++].iov_len = len;
-  }
+    // Delete the buffer input data which has now been consumed and, possibly,
+    // buffer some of the extra data that wasn't consumed.
+    varbuf_discard(&conn->rbuf, consumed);
 
-  unsigned outlen = max_iov;
-  size_t consumed;
+    struct iovec_cursor inc;
+    iovec_cursor_init(&inc, iniov, inlen);
+    iovec_cursor_seek(&inc, consumed);
 
-  if (obstcp_server_read(&conn->ctx, outiov, &outlen, &consumed, iniov, inlen) == -1) {
-    perror("obstcp_server_read");
-    ret = APR_ECONNABORTED;
-    goto exit;
-  }
+    varbuf_copy_iovec_cursor(&conn->rbuf, &inc);
 
-  // Delete the buffer input data which has now been consumed and, possibly,
-  // buffer some of the extra data that wasn't consumed.
-  varbuf_discard(&conn->rbuf, consumed);
+    const unsigned numprocessed = outlen + varbuf_count(&conn->obuf);
+    unsigned processedlen = numprocessed;
+    struct iovec *processediov = malloc(sizeof(struct iovec) * processedlen);
+    varbuf_to_iov(processediov, &processedlen, &conn->obuf);
+    memcpy(processediov + processedlen, outiov, outlen * sizeof(struct iovec));
 
-  struct iovec_cursor inc;
-  iovec_cursor_init(&inc, iniov, inlen);
-  iovec_cursor_seek(&inc, consumed);
+    struct iovec_cursor processedc;
+    iovec_cursor_init(&processedc, processediov, numprocessed);
 
-  varbuf_copy_iovec_cursor(&conn->rbuf, &inc);
+    ret = mod_obstcp_obuf_use(bb, &consumed, &processedc, mode, bytes, f->c->bucket_alloc);
+    const ssize_t remaining = varbuf_discard(&conn->obuf, consumed);
 
+    struct iovec_cursor outc;
+    iovec_cursor_init(&outc, outiov, outlen);
+    iovec_cursor_seek(&outc, remaining);
 
-  struct iovec_cursor outc;
-  iovec_cursor_init(&outc, outiov, outlen);
+    varbuf_copy_iovec_cursor(&conn->obuf, &outc);
+    bytes -= consumed;
 
-  ret = mod_obstcp_obuf_use(bb, &consumed, &outc, mode, bytes, f->c->bucket_alloc);
+    for (b = APR_BRIGADE_FIRST(conn->bb);
+         b != APR_BRIGADE_SENTINEL(conn->bb);
+         b = APR_BUCKET_NEXT(b)) {
+      apr_bucket_delete(b);
+    }
 
-  varbuf_copy_iovec_cursor(&conn->obuf, &outc);
+    free(iniov);
+    free(outiov);
+  } while (ret == APR_SUCCESS && !eof_seen && block == APR_BLOCK_READ &&
+           ((mode == AP_MODE_GETLINE && !consumed) ||
+            (mode == AP_MODE_READBYTES && bytes)));
 
 exit:
   for (b = APR_BRIGADE_FIRST(conn->bb);
@@ -540,9 +650,6 @@ exit:
        b = APR_BUCKET_NEXT(b)) {
     apr_bucket_delete(b);
   }
-
-  free(iniov);
-  free(outiov);
 
   return ret;
 }
@@ -556,7 +663,7 @@ mod_obstcp_flush_iovs(struct obstcp_server_ctx *ctx, apr_bucket_brigade *outbb,
     abort();  // programming error in this code
 
   if (iov.iov_len) {
-    apr_bucket *outb = apr_bucket_heap_create(iov.iov_base, iov.iov_len, free, alloc);
+    apr_bucket *outb = apr_bucket_heap_create(iov.iov_base, iov.iov_len, NULL, alloc);
     APR_BRIGADE_INSERT_TAIL(outbb, outb);
   }
 
@@ -622,6 +729,7 @@ mod_obstcp_io_filter_output(ap_filter_t *f, apr_bucket_brigade *bb)
       done += encrypted;
     }
 
+    APR_BUCKET_REMOVE(b);
     apr_bucket_delete(b);
   }
 
