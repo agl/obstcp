@@ -24,14 +24,14 @@ obstcp-cli: libobstcp.a obstcp-cli.c
 obstcp-keygen: obstcp-keygen.c libobstcp.a
 	gcc $(CFLAGS) -o obstcp-keygen obstcp-keygen.c libobstcp.a
 
-libobstcp.so.1: libobstcp.o salsa20-merged.o sha256.o base64.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o cursor.h varbuf.h iovec_cursor.h
-	gcc -o libobstcp.so.1 -shared -Wl,-soname -Wl,libobstcp.so.1 -ldl libobstcp.o salsa20-merged.o sha256.o base64.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o
+libobstcp.so.1: libobstcp.o salsa20-merged.o sha256.o base32.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o cursor.h varbuf.h iovec_cursor.h
+	gcc -o libobstcp.so.1 -shared -Wl,-soname -Wl,libobstcp.so.1 -ldl libobstcp.o salsa20-merged.o sha256.o base32.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o
 
-libobstcp.a: libobstcp.o salsa20-merged.o sha256.o base64.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o cursor.h varbuf.h iovec_cursor.h
-	ar -rc libobstcp.a libobstcp.o salsa20-merged.o sha256.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o base64.o
+libobstcp.a: libobstcp.o salsa20-merged.o sha256.o base32.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o cursor.h varbuf.h iovec_cursor.h
+	ar -rc libobstcp.a libobstcp.o salsa20-merged.o sha256.o curve25519-donna-x86-64.o curve25519-donna-x86-64.s.o base32.o
 
-base64.o: base64.c
-	gcc $(CFLAGS) -c base64.c
+base32.o: base32.c
+	gcc $(CFLAGS) -c base32.c
 
 sha256.o: sha256.c
 	gcc $(CFLAGS) -c sha256.c
