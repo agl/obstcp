@@ -47,9 +47,9 @@ client(uint32_t destip, const char *advert) {
   }
 
   int port;
-  if (!obstcp_advert_parse(advert, strlen(advert),
-                           OBSTCP_ADVERT_OBSPORT, &port,
-                           OBSTCP_ADVERT_END)) {
+  if (!obstcp_advert_base32_parse(advert, strlen(advert),
+                                  OBSTCP_ADVERT_OBSPORT, &port,
+                                  OBSTCP_ADVERT_END)) {
     perror("obstcp_advert_parse");
     return 1;
   }

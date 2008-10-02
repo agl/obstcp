@@ -430,9 +430,9 @@ server_listen(struct obstcp_keys *keys, unsigned port) {
 
   char advert[1024];
   const int advertlen =
-    obstcp_advert_create(advert, sizeof(advert), keys,
-                         OBSTCP_ADVERT_OBSPORT, port,
-                         OBSTCP_ADVERT_END);
+    obstcp_advert_base32_create(advert, sizeof(advert), keys,
+                                OBSTCP_ADVERT_OBSPORT, port,
+                                OBSTCP_ADVERT_END);
   if (advertlen < 0 || advertlen >= sizeof(advert)) {
     perror("advert_create");
     return -1;

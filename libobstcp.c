@@ -11,10 +11,11 @@
 #include <limits.h>
 
 #include <arpa/inet.h>
+#include <netdb.h>
 
 #include "libobstcp.h"
 #include "sha256.h"
-#include "base64.h"
+#include "base32.h"
 #include "salsa20.h"
 
 #include "cursor.h"
@@ -83,13 +84,11 @@ buffer_put(uint8_t *out, unsigned length, unsigned *offset,
   return 1;
 }
 
-int EXPORTED
-obstcp_advert_create(char *output, unsigned length,
-                     const struct obstcp_keys *keys, ...) {
-  va_list ap;
+static int
+advert_create(uint8_t *output, unsigned length,
+              const struct obstcp_keys *keys, va_list ap) {
   uint8_t advert[384];
   unsigned j = 0;
-  va_start(ap, keys);
 
   if (!keys->keys) {
     errno = ENOKEY;
@@ -131,9 +130,47 @@ obstcp_advert_create(char *output, unsigned length,
     if (type == OBSTCP_ADVERT_END) break;
   }
 
-  const unsigned outlen = obs_base64_encode_length(j);
+  if (j <= length)
+    memcpy(output, advert, j);
+
+  return j;
+
+ spc:
+  errno = E2BIG;
+  return -1;
+}
+
+int EXPORTED
+obstcp_advert_create(uint8_t *output, unsigned length,
+                            const struct obstcp_keys *keys, ...) {
+  va_list ap;
+  va_start(ap, keys);
+
+  const int r = advert_create(output, length, keys, ap);
+  va_end(ap);
+
+  return r;
+}
+
+int EXPORTED
+obstcp_advert_base32_create(char *output, unsigned length,
+                            const struct obstcp_keys *keys, ...) {
+  uint8_t advert[384];
+  va_list ap;
+  va_start(ap, keys);
+
+  const int ret = advert_create(advert, sizeof(advert), keys, ap);
+  va_end(ap);
+
+  if (ret > sizeof(advert)) {
+    goto spc;
+  } else if (ret == -1) {
+    return -1;
+  }
+
+  const unsigned outlen = base32_encode_length(ret);
   if (outlen <= length) {
-    obs_base64_encode(output, advert, j);
+    base32_encode(output, advert, ret);
   }
   return outlen;
 
@@ -142,30 +179,23 @@ obstcp_advert_create(char *output, unsigned length,
   return -1;
 }
 
-int EXPORTED
-obstcp_advert_parse(const char *input, unsigned length, ...) {
-  uint8_t advert[384];
-  unsigned len, j = 0;
+static int
+advert_parse(const uint8_t *advert, const unsigned length, va_list ap) {
+  unsigned j = 0;
   int tlsport = 0, obsport = 0;
   uint16_t port;
   uint32_t v, type;
-  va_list ap;
-
-  va_start(ap, length);
-
-  if (obs_base64_decode_length(length) > sizeof(advert)) return 0;
-  if (!obs_base64_decode(advert, &len, input, length)) return 0;
 
   for (;;) {
-    if (j == len) break;
-    if (!varint_get(&type, advert, len, &j)) return 0;
+    if (j == length) break;
+    if (!varint_get(&type, advert, length, &j)) return 0;
     switch (type >> 1) {
     case OBSTCP_KIND_OBSPORT:
     case OBSTCP_KIND_TLSPORT:
       if (!(type & 1)) return 0;
-      if (!varint_get(&v, advert, len, &j)) return 0;
+      if (!varint_get(&v, advert, length, &j)) return 0;
       if (v != 2) return 0;
-      if (j + 2 > len) return 0;
+      if (j + 2 > length) return 0;
       memcpy(&port, advert + j, 2);
       j += 2;
       port = ntohs(port);
@@ -177,8 +207,8 @@ obstcp_advert_parse(const char *input, unsigned length, ...) {
       break;
     default:
       if (type & 1) {
-        if (!varint_get(&v, advert, len, &j)) return 0;
-        if (j + v > len) return 0;
+        if (!varint_get(&v, advert, length, &j)) return 0;
+        if (j + v > length) return 0;
         j += v;
       }
     }
@@ -202,6 +232,144 @@ obstcp_advert_parse(const char *input, unsigned length, ...) {
     default:
       return 0;
     }
+  }
+}
+
+int EXPORTED
+obstcp_advert_parse(const uint8_t *input, unsigned length, ...) {
+  va_list ap;
+  va_start(ap, length);
+
+  const int r = advert_parse(input, length, ap);
+  va_end(ap);
+
+  return r;
+}
+
+int EXPORTED
+obstcp_advert_base32_parse(const char *input, unsigned length, ...) {
+  va_list ap;
+  va_start(ap, length);
+  uint8_t advert[384];
+  const unsigned decoded_length = base32_decode_length(length);
+
+  if (decoded_length > sizeof(advert)) return 0;
+  if (!base32_decode(advert, input, length)) return 0;
+
+  const int r = advert_parse(advert, decoded_length, ap);
+  va_end(ap);
+
+  return r;
+}
+
+static const char *kDNSMagic = "ae0xx";
+static const unsigned kDNSMagicLen = 5;
+static const unsigned kDNSCharsPerLabel = 63 - 5;
+
+int EXPORTED
+obstcp_advert_cname_extract(char *output, unsigned *ooutlen, const char *name) {
+  unsigned j = 0;  // current offset into output
+  const unsigned outlen = *ooutlen;
+
+  while (*name) {
+    if (strncmp(name, kDNSMagic, kDNSMagicLen) == 0) {
+      char good = 1;
+      unsigned count = 0;
+      const char *i;
+
+      for (i = name + kDNSMagicLen; *i; ++i, count++) {
+        const char c = *i;
+        if (c == '.' || !c)
+          break;
+        if ((c >= '0' && c <= '9') ||
+          (c > 'a' && c <= 'z' && c != 'e' && c != 'i' && c != 'o') ||
+          (c > 'A' && c <= 'Z' && c != 'E' && c != 'I' && c != 'O'))
+          continue;
+        good = 0;
+        break;
+      }
+
+      if (!count)
+        good = 0;
+
+      if (good) {
+        if (!buffer_put((uint8_t *) output, outlen, &j,
+                        name + kDNSMagicLen, count)) goto spc;
+        name += kDNSMagicLen + count;
+        if (*name == '.')
+          name++;
+        continue;
+      }
+    }
+
+    while (*name && *name != '.')
+      name++;
+    if (*name == '.') {
+      name++;
+    } else {
+      break;
+    }
+  }
+
+  if (!j) {
+    errno = EEXIST;
+    return 0;
+  }
+
+  *ooutlen = j;
+
+  return 1;
+
+ spc:
+  errno = ENOSPC;
+  return 0;
+}
+
+int EXPORTED
+obstcp_advert_hostent_extract(char *output, unsigned *outlen,
+                              const struct hostent *hent) {
+  unsigned i;
+
+  for (i = 0; hent->h_aliases[i]; ++i) {
+      if (!obstcp_advert_cname_extract(output, outlen, hent->h_aliases[i])) {
+        if (errno != EEXIST)
+          return 0;
+      } else {
+        return 1;
+      }
+  }
+
+  if (hent->h_name) {
+    return obstcp_advert_cname_extract(output, outlen, hent->h_name);
+  } else {
+    errno = EEXIST;
+    return 0;
+  }
+}
+
+unsigned EXPORTED
+obstcp_advert_cname_encode_sz(unsigned advertlen) {
+  const unsigned labels =
+    (advertlen + (kDNSCharsPerLabel - 1)) / kDNSCharsPerLabel;
+  return labels * (kDNSMagicLen + 1) + advertlen;
+}
+
+void EXPORTED
+obstcp_advert_cname_encode(char *output,
+                           const char *advert, unsigned advertlen) {
+  unsigned i = 0, j = 0;  // i indexes @advert, j indexes @output
+
+  while (advertlen) {
+    memcpy(output + j, kDNSMagic, kDNSMagicLen);
+    j += kDNSMagicLen;
+    unsigned todo = advertlen;
+    if (todo > kDNSCharsPerLabel)
+      todo = kDNSCharsPerLabel;
+    memcpy(output + j, advert + i, todo);
+    i += todo;
+    j += todo;
+    advertlen -= todo;
+    output[j++] = '.';
   }
 }
 
@@ -549,12 +717,13 @@ enum {
 static int
 client_parse_advert(uint8_t *public, const char *advert, unsigned inlen) {
   uint8_t decoded[384];
-  unsigned len, j = 0;
+  unsigned j = 0;
   char public_found = 0;
   uint32_t v;
+  const unsigned len = base32_decode_length(inlen);
 
-  if (obs_base64_decode_length(inlen) > 384) return 0;
-  if (!obs_base64_decode(decoded, &len, advert, inlen)) return 0;
+  if (len > 384) return 0;
+  if (!base32_decode(decoded, advert, inlen)) return 0;
 
   for (;;) {
     if (j == len) break;

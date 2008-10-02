@@ -61,9 +61,10 @@ main(int argc, char **argv) {
 
   char output[512];
 
-  const int r = obstcp_advert_create(output, sizeof(output), &keys,
-                                     OBSTCP_ADVERT_OBSPORT, (int) portnum,
-                                     OBSTCP_ADVERT_END);
+  const int r =
+    obstcp_advert_base32_create(output, sizeof(output), &keys,
+                                OBSTCP_ADVERT_OBSPORT, (int) portnum,
+                                OBSTCP_ADVERT_END);
   if (r >= sizeof(output)) {
     fprintf(stderr, "Advert too large\n");
     return 1;
@@ -74,6 +75,15 @@ main(int argc, char **argv) {
 
   output[r] = 0;
   fprintf(stderr, "Advert: %s\n", output);
+
+  char dnsadvert[512];
+  if (obstcp_advert_cname_encode_sz(r) > sizeof(dnsadvert)) {
+    fprintf(stderr, "Cannot print DNS advert");
+  } else {
+    obstcp_advert_cname_encode(dnsadvert, output, r);
+    dnsadvert[obstcp_advert_cname_encode_sz(r)] = 0;
+    fprintf(stderr, "DNS Advert: %s\n", dnsadvert);
+  }
 
   write(1, private_key, 32);
 

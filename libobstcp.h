@@ -100,16 +100,16 @@ enum {
 };
 
 // -----------------------------------------------------------------------------
-// Generate a base64 encoded obstcp "advert", this is the data that can be
-// included in a DNS TXT record of via other side channels. It takes a variable
-// argument list. The variable part of the argument list are a series of pairs
-// where the first element of the pair is one of OBSTCP_ADVERT_* and the second
-// depends on the value of the first, and may not even exist. The default key
-// from the keyset is used for the public value.
+// Generate a binary obstcp "advert", this is the data that can be included in
+// DNS CNAME or other side channels. It takes a variable argument list. The
+// variable part of the argument list is a series of pairs where the first
+// element of the pair is one of OBSTCP_ADVERT_* and the second depends on the
+// value of the first, and may not even exist. The default key from the keyset
+// is used for the public value.
 //
 // The variable list must be terminated with OBSTCP_ADVERT_END.
 //
-// output: a buffer to which the base64 encoded data is written
+// output: a buffer to which the data is written
 // length: number of bytes of space in @output
 // returns: on success a value <= to @length is returned. This is the number of
 //   bytes written. If @output was too small, a value > @length is returned.
@@ -120,12 +120,19 @@ enum {
 //   EINVAL: an unknown or invalid pair was found in the arguments
 //   ENOKEY: no default key was found in the keyset
 // -----------------------------------------------------------------------------
-int PUBLIC obstcp_advert_create(char *output, unsigned length,
-                                const struct obstcp_keys *keys, ...);
+extern int PUBLIC obstcp_advert_create(uint8_t *output, unsigned length,
+                                       const struct obstcp_keys *keys, ...);
 
 // -----------------------------------------------------------------------------
-// Parse a base64 encoded obstcp "advert". This can be used to extract the
-// advertised obfuscated and TLS port numbers.
+// This acts exactly the same as the _advert_create function, above, except
+// that the output is base32 encoded.
+// -----------------------------------------------------------------------------
+extern int PUBLIC obstcp_advert_base32_create(char *output, unsigned length,
+                                              const struct obstcp_keys *keys, ...);
+
+// -----------------------------------------------------------------------------
+// Parse a binary obstcp "advert". This can be used to extract the advertised
+// obfuscated and TLS port numbers.
 //
 // The variable arguments come in pairs. The first of each pair is one of
 // OBSTCP_ADVERT_* which are shared with obstcp_advert_create, above. However,
@@ -138,11 +145,80 @@ int PUBLIC obstcp_advert_create(char *output, unsigned length,
 // For elements which aren't found a special value is used to denote this. For
 // port numbers, this value is 0.
 //
-// input: the base64 encoded banner
+// input: banner data
 // length: the number of bytes in @input (not inc \n etc)
 // returns: 1 on success, 0 on parse error.
 // -----------------------------------------------------------------------------
-int PUBLIC obstcp_advert_parse(const char *input, unsigned length, ...);
+extern int PUBLIC obstcp_advert_parse(const uint8_t *input, unsigned length, ...);
+
+// -----------------------------------------------------------------------------
+// This acts exactly the same as the _advert_parse function, above, except
+// that the input must be base32 encoded.
+// -----------------------------------------------------------------------------
+extern int PUBLIC obstcp_advert_base32_parse(const char *input, unsigned length, ...);
+
+// -----------------------------------------------------------------------------
+// Extract an advert from a CNAME. The CNAME should be NUL terminated, with
+// dots as usual (e.g. 'www.google.com').
+//
+// output: an output buffer to receive the base32 encoded advert
+// outlen: (in/out) on entry, the number of bytes in @output. On successful
+//   exit, but number of bytes written to @output
+// input: a NUL terminated DNS name
+//
+// To avoid ENOSPC one can make the output buffer as large as the input. This
+// will always work.
+//
+// Returns 1 on success, 0 on failure. Errno is set
+//   ENOSPC: output buffer was too small
+//   EEXIST: the name doesn't contain an encoded advert
+// -----------------------------------------------------------------------------
+extern int PUBLIC obstcp_advert_cname_extract(char *output, unsigned *outlen,
+                                              const char *input);
+
+// -----------------------------------------------------------------------------
+// Returns the length of the DNS label encoding of a base32 encoded advert a
+// given size.
+// -----------------------------------------------------------------------------
+extern unsigned PUBLIC obstcp_advert_cname_encode_sz(unsigned advertlen);
+
+// -----------------------------------------------------------------------------
+// Extract an advert from a hostent structure. This is the structure resulting
+// from a gethostbyname(2) call.
+//
+// output: an output buffer to receive the base32 encoded advert
+// outlen: (in/out) on entry, the number of bytes in @output. On successful
+//   exit, but number of bytes written to @output
+// hent: a hostent resulting from one of the gethostbyname(2) family.
+//
+// Since the longest DNS name is 256 bytes, that's a sensible size for the
+// output buffer to avoid ENOSPC.
+//
+// Returns 1 on success, 0 on failure. Errno is set
+//   ENOSPC: output buffer was too small
+//   EEXIST: the name doesn't contain an encoded advert
+// -----------------------------------------------------------------------------
+
+struct hostent;
+extern int PUBLIC obstcp_advert_hostent_extract(char *output, unsigned *outlen,
+                                                const struct hostent *hent);
+
+// -----------------------------------------------------------------------------
+// Take a base32 encoded advert and split it into pieces for inclusion in a DNS
+// name.
+//
+// output: an output buffer of sufficient size
+// advert: base32 encoded advert
+// advertlen: number of bytes in @advert
+//
+// The output buffer should be at least as large as
+// obstcp_advert_cname_encode_sz returns.
+//
+// The result is a number of DNS labels (and is not NUL terminated). For
+// example: "ae0xx12345679.ae0xx12346789."
+// -----------------------------------------------------------------------------
+extern void PUBLIC obstcp_advert_cname_encode(char *output,
+                                              const char *advert, unsigned advertlen);
 
 // -----------------------------------------------------------------------------
 // This is the crypto context for a given direction of data

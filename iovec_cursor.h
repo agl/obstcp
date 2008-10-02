@@ -1,6 +1,8 @@
 #ifndef IOVEC_CURSOR
 #define IOVEC_CURSOR
 
+#include <stdio.h>
+
 #define MAYBEUNUSED __attribute__((unused))
 
 // -----------------------------------------------------------------------------
