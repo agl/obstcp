@@ -1,7 +1,14 @@
 module Main where
 
 import           Graphics.Rendering.Cairo as C
+import           Data.Word (Word8)
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.Binary.Get as G
 import           Text.Printf (printf)
+import           Debug.Trace (trace)
+
+debug x = trace (show x) x
 
 -- These are the standard Youtube values
 videoWidth = 320 :: Int
@@ -72,7 +79,7 @@ centerWord tx = do
   blackBackground
   selectFontFace "monospace" FontSlantNormal FontWeightNormal
   setFontSize 0.1
-  setSourceRGBA 0.2 0.6 0 1
+  setSourceRGBA 0.7 0.7 0.7 1
   centerText tx
   fill
 
@@ -81,7 +88,7 @@ textAt tx x y = do
   pushTransMatrix $ do
     selectFontFace "monospace" FontSlantNormal FontWeightNormal
     setFontSize 0.1
-    setSourceRGBA 0.2 0.6 0 1
+    setSourceRGBA 0.7 0.7 0.7 1
     translate x y
     ex <- C.textExtents tx
     translate (0-(textExtentsWidth ex / 2)) 0
@@ -137,7 +144,7 @@ typeset boxes = do
           C.fill
 
   blackBackground
-  setSourceRGBA 0.2 0.6 0 1
+  setSourceRGBA 0.7 0.7 0.7 1
   widths <- mapM boxWidth boxes
   pushTransMatrix $ do
     translate (0-(sum widths / 2)) 0
@@ -252,20 +259,71 @@ timeMangle = map (\(start, x) -> (start / 1.0, x))
 sceneTimeMangle :: Scene -> Scene
 sceneTimeMangle = map (\(start, x) -> (start / 1.0, x))
 
-vidrn :: Video -> Double -> IO ()
-vidrn vid duration = doFrames 0 (0 :: Int) where
+waveFrames :: G.Get [B.ByteString]
+waveFrames = do
+  G.getByteString 44  -- chomp header
+
+  let sample :: G.Get Word8
+      sample = do
+        left <- G.getWord16le
+        right <- G.getWord16le
+        let left' = if left >= 32768
+                       then 32768 - (65536 - left)
+                       else left + 32768
+        return $ fromIntegral (left' `div` 256)
+      frame :: Int -> B.ByteString -> G.Get B.ByteString
+      frame n bs
+        | n == 1470 = return bs
+        | otherwise = do
+            s <- sample
+            frame (n + 1) (bs `B.snoc` s)
+      loop = do
+        emptyp <- G.isEmpty
+        if emptyp
+           then return [B.pack $ replicate 1470 0]
+           else do
+             f <- frame 0 B.empty
+             rest <- loop
+             return (f : rest)
+  loop
+
+frameToSamples :: B.ByteString -> B.ByteString
+frameToSamples bs
+  | B.null bs = B.empty
+  | otherwise = average `B.append` frameToSamples rest where
+      (a, rest) = B.splitAt 5 bs
+      values :: [Int]
+      values = map fromIntegral $ B.unpack a
+      average = B.singleton $ fromIntegral $ sum values `div` 5
+
+plotSamples :: B.ByteString -> C.Render ()
+plotSamples bs = do
+  C.setLineWidth 0.004
+  C.setSourceRGBA 0 0 1 0.5
+  C.moveTo (-0.6666) 0
+  let a = 1.333333/294
+      c = 0.6666666 / 256
+      points = map (\(x,y) -> ((-0.66666) + a * fromIntegral x, (-0.333333) + fromIntegral y * c)) $ zip [0..294] $ B.unpack bs
+  mapM_ (\(x,y) -> C.lineTo x y) points
+  C.stroke
+
+vidrn :: BL.ByteString -> Video -> Double -> IO ()
+vidrn soundInput vid duration = doFrames sound 0 (0 :: Int) where
+  sound = G.runGet waveFrames soundInput
   frameStep = 1 / framesPerSecond
-  doFrames currentTime frameno
+  doFrames soundIn currentTime frameno
     | currentTime > duration = return ()
     | otherwise = do
         let (start, scene) = head $ reverse $ [x | x@(start, scene) <- vid, currentTime >= start]
             expired = currentTime - start
+            samples = frameToSamples $ head soundIn
         printf " : %f %d %f\n" currentTime frameno expired
         surface <- C.createImageSurface C.FormatARGB32 videoWidth videoHeight
-        renderWith surface $ sceneDraw scene expired
+        renderWith surface (sceneDraw scene expired >> plotSamples samples)
         surfaceWriteToPNG surface $ printf "out%05d.png" frameno
         surfaceFinish surface
-        doFrames (currentTime + frameStep) (frameno + 1)
+        doFrames (tail soundIn) (currentTime + frameStep) (frameno + 1)
 
 main = do
-  vidrn (timeMangle video) 277
+  soundInput <- BL.readFile "/home/agl/Desktop/script.wav"
+  vidrn soundInput (timeMangle video) 277
