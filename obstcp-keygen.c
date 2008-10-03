@@ -18,28 +18,38 @@ usage(const char *argv0) {
 
 int
 main(int argc, char **argv) {
-  if (argc != 2) return usage(argv[0]);
-
-  char *endptr;
-  const unsigned long portnum = strtoul(argv[1], &endptr, 10);
-  if (*endptr) {
-    fprintf(stderr, "Not a valid number: %s\n", argv[1]);
-    return 1;
-  }
-
-  if (portnum == 0 || portnum > 65535) {
-    fprintf(stderr, "Not a valid port number (1..65535): %lu\n", portnum);
-    return 1;
-  }
-
-  struct obstcp_keys keys;
-  obstcp_keys_init(&keys);
+  if (argc > 2) return usage(argv[0]);
 
   const int urfd = open("/dev/random", O_RDONLY);
   if (urfd < 0) {
     perror("Cannot open /dev/random");
     return 1;
   }
+
+  uint16_t portnum;
+
+  if (argc == 2) {
+    char *endptr;
+    const unsigned long p = strtoul(argv[1], &endptr, 10);
+    if (*endptr) {
+      fprintf(stderr, "Not a valid number: %s\n", argv[1]);
+      return 1;
+    }
+
+    if (p == 0 || p > 65535) {
+      fprintf(stderr, "Not a valid port number (1..65535): %lu\n", p);
+      return 1;
+    }
+
+    portnum = p;
+  } else {
+    read(urfd, &portnum, 2);
+    portnum &= 0x3fff;
+    portnum += 1024;
+  }
+
+  struct obstcp_keys keys;
+  obstcp_keys_init(&keys);
 
   uint8_t private_key[32];
 
@@ -74,6 +84,7 @@ main(int argc, char **argv) {
   }
 
   output[r] = 0;
+  fprintf(stderr, "Port: %d\n", portnum);
   fprintf(stderr, "Advert: %s\n", output);
 
   char dnsadvert[512];
