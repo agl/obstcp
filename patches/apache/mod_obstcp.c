@@ -212,10 +212,6 @@ mod_obstcp_obuf_use(apr_bucket_brigade *bb, size_t *oconsumed,
     if (a != line)
       memcpy(line, a, lineoffset + 1);
 
-    fprintf(stderr, "mod_obstcp: emitting line: ");
-    fflush(stderr);
-    write(2, line, lineoffset + 1);
-
     apr_bucket *outb = apr_bucket_heap_create((char *) line, lineoffset + 1,
                                               free, alloc);
     APR_BRIGADE_INSERT_TAIL(bb, outb);
