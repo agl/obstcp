@@ -1,18 +1,5 @@
-diff --git a/netwerk/base/src/Makefile.in b/netwerk/base/src/Makefile.in
-index 4c2dea5..1238a03 100644
---- a/netwerk/base/src/Makefile.in
-+++ b/netwerk/base/src/Makefile.in
-@@ -95,6 +95,8 @@ CPPSRCS		= \
- 		nsSerializationHelper.cpp \
- 		$(NULL)
- 
-+LIBS += -lobstcp
-+
- ifeq ($(MOZ_WIDGET_TOOLKIT),os2)
- 	CPPSRCS += nsURLHelperOS2.cpp
- else
 diff --git a/netwerk/base/src/nsSocketTransport2.cpp b/netwerk/base/src/nsSocketTransport2.cpp
-index e81a367..18b995e 100644
+index e81a367..a27250d 100644
 --- a/netwerk/base/src/nsSocketTransport2.cpp
 +++ b/netwerk/base/src/nsSocketTransport2.cpp
 @@ -48,6 +48,8 @@
@@ -294,35 +281,30 @@ index e81a367..18b995e 100644
      nsSocketTransportService *serv = gSocketTransportService;
      NS_RELEASE(serv); // nulls argument
  }
-@@ -1155,11 +1304,49 @@ nsSocketTransport::InitiateSocket()
+@@ -1155,11 +1304,44 @@ nsSocketTransport::InitiateSocket()
      // 
      // Initiate the connect() to the host...  
      //
 +    struct obstcp_keys *const keys = ns_obstcp_get_keys();
-+    nsXPIDLCString tempString;
 +
-+    nsCOMPtr<nsIPrefBranch> prefs = do_GetService(NS_PREFSERVICE_CONTRACTID);
-+    if (mProxyPort == 0 && strlen(mHost.get()) && mPort == 80) {
-+        char buffer[512];
-+        snprintf(buffer, 512, "network.obstcp.%s", mHost.get());
-+
-+        nsresult prefsrv =
-+            prefs->GetCharPref(buffer, getter_Copies(tempString));
-+        if (NS_SUCCEEDED(prefsrv)) {
-+            const char msg[] = "OBSTCP:switching\n";
-+            write(1, msg, strlen(msg));
++    if (mProxyPort == 0 && strlen(mHost.get()) && mPort == 80 && mDNSRecord) {
++        nsCString advert;
++        nsresult r = mDNSRecord->GetAdvert(advert);
++        if (NS_SUCCEEDED(r)) {
 +            int newport;
 +
-+            if (obstcp_advert_parse(tempString.get(), strlen(tempString.get()),
-+                                    OBSTCP_ADVERT_OBSPORT, &newport,
-+                                    OBSTCP_ADVERT_END) &&
++            if (obstcp_advert_base32_parse
++                (advert.get(), advert.Length(),
++                 OBSTCP_ADVERT_OBSPORT, &newport,
++                 OBSTCP_ADVERT_END) &&
 +                newport) {
++
 +                mNetAddr.inet.port = htons(newport);
 +                mObfuscation = 1;
 +                PRUint8 random[16];
 +                PR_GetRandomNoise(random, sizeof(random));
-+                if (!obstcp_client_ctx_init(&mObsContext, keys, tempString.get(),
-+                                            strlen(tempString.get()), random)) {
++                if (!obstcp_client_ctx_init(&mObsContext, keys, advert.get(),
++                                            advert.Length(), random)) {
 +                    abort();
 +                }
 +                obstcp_client_accum_init(&mObsAccum, &mObsContext);
@@ -344,7 +326,7 @@ index e81a367..18b995e 100644
          OnSocketConnected();
      }
      else {
-@@ -1179,6 +1366,11 @@ nsSocketTransport::InitiateSocket()
+@@ -1179,6 +1361,11 @@ nsSocketTransport::InitiateSocket()
              //
              // we are connected!
              //
@@ -356,7 +338,17 @@ index e81a367..18b995e 100644
              OnSocketConnected();
  
              if (mSecInfo && !mProxyHost.IsEmpty() && proxyTransparent && usingSSL) {
-@@ -1506,6 +1698,11 @@ nsSocketTransport::OnSocketReady(PRFileDesc *fd, PRInt16 outFlags)
+@@ -1408,6 +1595,9 @@ nsSocketTransport::OnSocketEvent(PRUint32 type, nsresult status, nsISupports *pa
+         if (param) {
+             mDNSRecord = static_cast<nsIDNSRecord *>(param);
+             mDNSRecord->GetNextAddr(SocketPort(), &mNetAddr);
++
++            nsCString *result = new nsCString();
++            delete result;
+         }
+         // status contains DNS lookup status
+         if (NS_FAILED(status)) {
+@@ -1506,6 +1696,11 @@ nsSocketTransport::OnSocketReady(PRFileDesc *fd, PRInt16 outFlags)
              //
              // we are connected!
              //
@@ -410,6 +402,19 @@ index de4133f..3b2c177 100644
  
      // socket methods (these can only be called on the socket thread):
  
+diff --git a/netwerk/build/Makefile.in b/netwerk/build/Makefile.in
+index eba1bdc..274609c 100644
+--- a/netwerk/build/Makefile.in
++++ b/netwerk/build/Makefile.in
+@@ -127,6 +127,8 @@ EXTRA_DSO_LDOPTS += \
+ 	$(NULL)
+ endif
+ 
++EXTRA_DSO_LDOPTS += -lobstcp
++
+ ifeq ($(OS_ARCH),AIX)
+ EXTRA_DSO_LDOPTS += -lodm -lcfg
+ endif
 diff --git a/netwerk/dns/public/nsIDNSRecord.idl b/netwerk/dns/public/nsIDNSRecord.idl
 index 4e6d68f..71b7b1f 100644
 --- a/netwerk/dns/public/nsIDNSRecord.idl
@@ -428,66 +433,27 @@ index 4e6d68f..71b7b1f 100644
       * given PRNetAddr struct and increments the internal address iterator.
       *
 diff --git a/netwerk/dns/src/nsDNSService2.cpp b/netwerk/dns/src/nsDNSService2.cpp
-index a6b8a75..335bf7a 100644
+index a6b8a75..45e461b 100644
 --- a/netwerk/dns/src/nsDNSService2.cpp
 +++ b/netwerk/dns/src/nsDNSService2.cpp
-@@ -64,6 +64,55 @@ static const char kPrefDisableIPv6[]        = "network.dns.disableIPv6";
+@@ -56,14 +56,14 @@
+ #include "prio.h"
+ #include "plstr.h"
  
- //-----------------------------------------------------------------------------
++#include <libobstcp.h>
++
+ static const char kPrefDnsCacheEntries[]    = "network.dnsCacheEntries";
+ static const char kPrefDnsCacheExpiration[] = "network.dnsCacheExpiration";
+ static const char kPrefEnableIDN[]          = "network.enableIDN";
+ static const char kPrefIPv4OnlyDomains[]    = "network.dns.ipv4OnlyDomains";
+ static const char kPrefDisableIPv6[]        = "network.dns.disableIPv6";
  
-+typedef unsigned char uint8_t;
-+
-+static const uint8_t kValues[] = {
-+99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,0,1,2,3,4,5,6,7,8,9,99,99,99,99,99,99,99,99,10,11,12,99,13,14,15,99,16,17,18,19,20,99,21,22,23,24,25,26,27,28,29,30,31,99,99,99,99,99,99,99,10,11,12,99,13,14,15,99,16,17,18,19,20,99,21,22,23,24,25,26,27,28,29,30,31,99,99,99,99,99};
-+
-+int
-+base32_decode(uint8_t *output, unsigned *ooutlen,
-+              const uint8_t *in, unsigned inlen, int mode) {
-+  unsigned i = 0, j = 0;
-+  unsigned v = 0, bits = 0;
-+  const unsigned outlen = *ooutlen;
-+
-+  while (j < inlen) {
-+    if (in[j] & 0x80)
-+      goto PROTO;
-+    const uint8_t b = kValues[in[j++]];
-+    if (b > 31)
-+      goto PROTO;
-+
-+    v |= ((unsigned) b) << bits;
-+    bits += 5;
-+
-+    if (bits >= 8) {
-+      if (i >= outlen)
-+        goto TOOBIG;
-+      output[i++] = v;
-+      bits -= 8;
-+      v >>= 8;
-+    }
-+  }
-+
-+  if (mode) {
-+    if (bits && i >= outlen)
-+      goto TOOBIG;
-+    output[i++] = v & ((1 << bits) - 1);
-+  }
-+
-+  *ooutlen = i;
-+  return 1;
-+
-+ TOOBIG:
-+  return 0;
-+
-+ PROTO:
-+  return 0;
-+}
-+
-+//-----------------------------------------------------------------------------
-+
+-//-----------------------------------------------------------------------------
+-
  class nsDNSRecord : public nsIDNSRecord
  {
  public:
-@@ -72,16 +121,16 @@ public:
+@@ -72,16 +72,16 @@ public:
  
      nsDNSRecord(nsHostRecord *hostRecord)
          : mHostRecord(hostRecord)
@@ -508,7 +474,7 @@ index a6b8a75..335bf7a 100644
                                           // mHostRecord->addr_info when we
                                           // start iterating
      PRBool                  mDone;
-@@ -99,16 +148,80 @@ nsDNSRecord::GetCanonicalName(nsACString &result)
+@@ -99,17 +99,49 @@ nsDNSRecord::GetCanonicalName(nsACString &result)
      // if the record is for an IP address literal, then the canonical
      // host name is the IP address literal.
      const char *cname;
@@ -526,48 +492,12 @@ index a6b8a75..335bf7a 100644
      return NS_OK;
  }
  
-+static int
-+advertInName(nsACString &result, const char *name) {
-+    // A hostname can only be 256 bytes long, so this buffer is long enough to
-+    // hold and any valid advert encoded in a name.
-+    unsigned char t[256];
-+    unsigned j = 0;  // current offset into t
-+
-+    for (;;) {
-+        if (strncmp(name, "opa", 3) == 0) {
-+            bool good = true;
-+            unsigned count = 0;
-+
-+            for (const char *i = name + 3; *i; ++i, count++) {
-+                const char c = *i;
-+                if ((c >= '0' && c <= '9') ||
-+                    (c > 'a' && c <= 'z' && c != 'e' && c != 'i' && c != 'o') ||
-+                    (c > 'A' && c <= 'Z' && c != 'E' && c != 'I' && c != 'O'))
-+                    continue;
-+                good = false;
-+                break;
-+            }
-+
-+            if (count == 0 || (count * 5) & 7)
-+                good = false;
-+
-+            unsigned space = sizeof(t) - j;
-+            if (!base32_decode(t + j, &space, (const uint8_t *) name + 3, count, 1))
-+                return 0;
-+            j += space;
-+        }
-+    }
-+
-+    if (!j)
-+        return 0;
-+
-+    result.Assign((const char *) t, j);
-+    return 1;
-+}
-+
-+NS_IMETHODIMP
+ NS_IMETHODIMP
 +nsDNSRecord::GetAdvert(nsACString &result)
 +{
++    char advert[256];
++    unsigned advertlen = sizeof(advert);
++
 +    PR_Lock(mHostRecord->hostent_lock);
 +    if (!mHostRecord->hostent_buf) {
 +        PR_Unlock(mHostRecord->hostent_lock);
@@ -575,14 +505,18 @@ index a6b8a75..335bf7a 100644
 +    }
 +
 +    for (unsigned i = 0; mHostRecord->hostent.h_aliases[i]; ++i) {
-+        if (advertInName(result, mHostRecord->hostent.h_aliases[i])) {
++        if (obstcp_advert_cname_extract
++            (advert, &advertlen, mHostRecord->hostent.h_aliases[i])) {
 +            PR_Unlock(mHostRecord->hostent_lock);
++            result.Assign(advert, advertlen);
 +            return NS_OK;
 +        }
 +    }
 +
-+    if (advertInName(result, mHostRecord->hostent.h_name)) {
++    if (obstcp_advert_cname_extract
++        (advert, &advertlen, mHostRecord->hostent.h_name)) {
 +        PR_Unlock(mHostRecord->hostent_lock);
++        result.Assign(advert, advertlen);
 +        return NS_OK;
 +    }
 +
@@ -590,10 +524,11 @@ index a6b8a75..335bf7a 100644
 +    return NS_ERROR_NOT_AVAILABLE;
 +}
 +
- NS_IMETHODIMP
++NS_IMETHODIMP
  nsDNSRecord::GetNextAddr(PRUint16 port, PRNetAddr *addr)
  {
-@@ -118,25 +231,31 @@ nsDNSRecord::GetNextAddr(PRUint16 port, PRNetAddr *addr)
+     // not a programming error to poke the DNS record when it has no more
+@@ -118,25 +150,31 @@ nsDNSRecord::GetNextAddr(PRUint16 port, PRNetAddr *addr)
      if (mDone)
          return NS_ERROR_NOT_AVAILABLE;
  
@@ -624,7 +559,7 @@ index a6b8a75..335bf7a 100644
              return NS_ERROR_NOT_AVAILABLE;
 +        } else {
 +            addr->raw.family = PR_AF_INET;
-+            addr->inet.port = port;
++            addr->inet.port = PR_htons(port);
 +            memcpy(&addr->inet.ip, mHostRecord->hostent.h_addr_list[mIter++], 4);
 +            PR_Unlock(mHostRecord->hostent_lock);
 +            return NS_OK;
@@ -636,7 +571,7 @@ index a6b8a75..335bf7a 100644
          if (!mHostRecord->addr) {
              // Both mHostRecord->addr_info and mHostRecord->addr are null.
              // This can happen if mHostRecord->addr_info expired and the
-@@ -152,8 +271,8 @@ nsDNSRecord::GetNextAddr(PRUint16 port, PRNetAddr *addr)
+@@ -152,8 +190,8 @@ nsDNSRecord::GetNextAddr(PRUint16 port, PRNetAddr *addr)
              addr->ipv6.port = port;
          mDone = PR_TRUE; // no iterations
      }
@@ -647,7 +582,7 @@ index a6b8a75..335bf7a 100644
  }
  
  NS_IMETHODIMP
-@@ -178,13 +297,9 @@ nsDNSRecord::HasMore(PRBool *result)
+@@ -178,13 +216,16 @@ nsDNSRecord::HasMore(PRBool *result)
      if (mDone)
          *result = PR_FALSE;
      else {
@@ -659,12 +594,19 @@ index a6b8a75..335bf7a 100644
 -        mIter = iterCopy; // backup iterator
 -        mDone = PR_FALSE;
 +        PR_Lock(mHostRecord->hostent_lock);
-+        *result = !mHostRecord->hostent.h_addr_list[mIter];
++        if (mIter == -1) {
++            mIter = 0;
++            mIterGenCnt = mHostRecord->hostent_gencnt;
++        } else if (mIterGenCnt != mHostRecord->hostent_gencnt) {
++            mIter = 0;
++            mIterGenCnt = mHostRecord->hostent_gencnt;
++        }
++        *result = mHostRecord->hostent.h_addr_list[mIter] != NULL;
 +        PR_Unlock(mHostRecord->hostent_lock);
      }
      return NS_OK;
  }
-@@ -192,8 +307,8 @@ nsDNSRecord::HasMore(PRBool *result)
+@@ -192,8 +233,8 @@ nsDNSRecord::HasMore(PRBool *result)
  NS_IMETHODIMP
  nsDNSRecord::Rewind()
  {
@@ -676,7 +618,7 @@ index a6b8a75..335bf7a 100644
      return NS_OK;
  }
 diff --git a/netwerk/dns/src/nsHostResolver.cpp b/netwerk/dns/src/nsHostResolver.cpp
-index 924159e..8dd5083 100644
+index 924159e..2308d89 100644
 --- a/netwerk/dns/src/nsHostResolver.cpp
 +++ b/netwerk/dns/src/nsHostResolver.cpp
 @@ -178,9 +178,9 @@ nsHostRecord::Create(const nsHostKey *key, nsHostRecord **result)
@@ -781,7 +723,7 @@ index 924159e..8dd5083 100644
              // add to mEvictionQ
              PR_APPEND_LINK(rec, &mEvictionQ);
              NS_ADDREF(rec);
-@@ -686,23 +655,26 @@ nsHostResolver::ThreadFunc(void *arg)
+@@ -686,23 +655,27 @@ nsHostResolver::ThreadFunc(void *arg)
  
      nsHostResolver *resolver = (nsHostResolver *) arg;
      nsHostRecord *rec;
@@ -804,13 +746,14 @@ index 924159e..8dd5083 100644
 +        if (!rec->hostent_buf)
 +            resolver->OnLookupComplete(rec, NS_ERROR_UNKNOWN_HOST);
 +
-+        nsresult s;
-+        s = PR_GetHostByName(rec->host, rec->hostent_buf, PR_NETDB_BUF_SIZE,
-+                             &rec->hostent);
++        int r = PR_GetHostByName(rec->host, rec->hostent_buf, PR_NETDB_BUF_SIZE,
++                                 &rec->hostent);
 +        rec->hostent_gencnt++;
-+        if (!NS_SUCCEEDED(s)) {
++        nsresult s = NS_OK;
++        if (r) {
 +            free(rec->hostent_buf);
 +            rec->hostent_buf = NULL;
++            s = NS_ERROR_UNKNOWN_HOST;
 +        }
 +        PR_Unlock(rec->hostent_lock);
  
