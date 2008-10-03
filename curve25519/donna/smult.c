@@ -66,16 +66,16 @@ extern void cmult(felem *x, felem *z, const u8 *n, const felem *q);
  *   xprime zprime: short form, destroyed
  *   qmqp: short form, preserved
  */
-void
+void __attribute__((visibility ("hidden")))
 fmonty(felem *x2,  /* output 2Q */
        felem *x3,  /* output Q + Q' */
        felem *x,    /* input Q */
        felem *xprime,  /* input Q' */
        const felem *qmqp /* input Q - Q' */) {
-  felem *const z2 = &x2[8];
-  felem *const z3 = &x3[8];
-  felem *const z = &x[8];
-  felem *const zprime = &xprime[8];
+  felem *const z2 = &x2[5];
+  felem *const z3 = &x3[5];
+  felem *const z = &x[5];
+  felem *const zprime = &xprime[5];
   felem origx[5], origxprime[5], zzz[5], xx[5], zz[5], xxprime[5],
         zzprime[5], zzzprime[5];
 
@@ -175,12 +175,21 @@ crecip(felem *out, const felem *z) {
   /* 2^255 - 21 */ fmul(out,t1,z11);
 }
 
-void
-curve25519_donna(u8 *mypublic, const u8 *secret, const u8 *basepoint) {
+int
+curve25519(u8 *mypublic, const u8 *secret, const u8 *basepoint) {
   felem bp[5], x[5], z[5], zmone[5];
+  uint8_t e[32];
+  int i;
+
+  for (i = 0;i < 32;++i) e[i] = secret[i];
+  e[0] &= 248;
+  e[31] &= 127;
+  e[31] |= 64;
+
   fexpand(bp, basepoint);
-  cmult(x, z, secret, bp);
+  cmult(x, z, e, bp);
   crecip(zmone, z);
   fmul(z, x, zmone);
   fcontract(mypublic, z);
+  return 0;
 }

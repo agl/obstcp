@@ -29,8 +29,8 @@
         type __min2 = (y);                        \
         __min1 < __min2 ? __min1: __min2; })
 
-extern void curve25519_donna(uint8_t *mypublic, const uint8_t *secret,
-                             const uint8_t *basepoint);
+extern void curve25519(uint8_t *mypublic, const uint8_t *secret,
+                       const uint8_t *basepoint);
 
 // -----------------------------------------------------------------------------
 // Utility functions for reading and writing the banners and adverts...
@@ -461,7 +461,7 @@ obstcp_keys_key_add(struct obstcp_keys *keys, const uint8_t *private_key) {
   kp->private_key[31] &= 127;
   kp->private_key[31] |= 64;
 
-  curve25519_donna(kp->public_key, kp->private_key, basepoint);
+  curve25519(kp->public_key, kp->private_key, basepoint);
 
   kp->keyid = key_keyid(kp->public_key);
 
@@ -641,7 +641,7 @@ obstcp_server_read(struct obstcp_server_ctx *ctx,
       return -1;
     }
 
-    curve25519_donna(shared, secret, theirpublic);
+    curve25519(shared, secret, theirpublic);
     server_setup(ctx, shared, nonce);
     *consumed += 2 + len;
   }
@@ -795,7 +795,7 @@ obstcp_client_ctx_init(struct obstcp_client_ctx *ctx, struct obstcp_keys *keys,
     return 0;
   }
 
-  curve25519_donna(shared, keys->keys->private_key, serverpublic);
+  curve25519(shared, keys->keys->private_key, serverpublic);
 
   sha256_init(&sha);
   sha256_update(&sha, shared, 32);
