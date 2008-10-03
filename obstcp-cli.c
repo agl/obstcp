@@ -13,6 +13,8 @@
 
 #include "libobstcp.h"
 
+static const char quit_on_stdin_eof = 0;
+
 static int
 client(uint32_t destip, const char *advert) {
   const int urfd = open("/dev/urandom", O_RDONLY);
@@ -111,7 +113,9 @@ client(uint32_t destip, const char *advert) {
 
       if (n == 0) {
         fprintf(stderr, " ** Stdin closed\n");
-        return 0;
+        if (quit_on_stdin_eof)
+          return 0;
+        epoll_ctl(efd, EPOLL_CTL_DEL, 0, NULL);
       } else if (n < 0) {
         perror("reading from stdin");
         return 1;
