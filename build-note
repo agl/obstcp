@@ -1,6 +1,6 @@
 ***** NOTE *****
 
-Due to the way that the build process works, some compilers errors
+Due to the way that the build process works, some compiler errors
 are expected as we try to build different platform specific code
 to find one that works.
 
