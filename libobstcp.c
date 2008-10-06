@@ -16,7 +16,7 @@
 #include "libobstcp.h"
 #include "sha256.h"
 #include "base32.h"
-#include "salsa20.h"
+#include "salsa208.h"
 
 #include "cursor.h"
 #include "iovec_cursor.h"
@@ -398,9 +398,21 @@ xor(uint8_t *dst, const uint8_t *src, const uint8_t *xorbytes, unsigned l) {
 }
 
 static void
+block_ctr_inc(uint8_t *ctr) {
+  unsigned i;
+
+  for (i = 0; i < 16; ++i) {
+    ctr[i]++;
+    if (ctr[i]) break;
+  }
+}
+
+static const uint8_t sigma[16] = "expand 32-byte k";
+
+static void
 encrypt(struct obstcp_half_connection *hc, uint8_t *out,
         const uint8_t *in, size_t len) {
-  size_t l = len, j = 0;
+  size_t l = len, j = 0, i;
 
   if (hc->used < 64) {
     const size_t m = min_t(size_t, 64u - hc->used, l);
@@ -411,13 +423,17 @@ encrypt(struct obstcp_half_connection *hc, uint8_t *out,
   }
   const unsigned chunks = l >> 6;
   if (chunks) {
-    ECRYPT_encrypt_bytes((struct ECRYPT_ctx *) hc->input, in + j, out + j, chunks << 6);
-    l -= chunks << 6;
-    j += chunks << 6;
+    for (i = 0; i < chunks; ++i) {
+      salsa208(hc->keystream, hc->block_ctr, hc->key, sigma);
+      block_ctr_inc(hc->block_ctr);
+      xor(out + j, in + j, hc->keystream, 64);
+      l -= chunks << 6;
+      j += chunks << 6;
+    }
   }
   if (l) {
-    memset(hc->keystream, 0, 64);
-    ECRYPT_encrypt_bytes((struct ECRYPT_ctx *) hc->input, hc->keystream, hc->keystream, 64);
+    salsa208(hc->keystream, hc->block_ctr, hc->key, sigma);
+    block_ctr_inc(hc->block_ctr);
     xor(out + j, in + j, hc->keystream, l);
     hc->used = l;
   }
@@ -590,8 +606,8 @@ server_setup(struct obstcp_server_ctx *ctx, const uint8_t *shared,
   memset(&ctx->u.b.in, 0, sizeof(struct obstcp_half_connection));
   memset(&ctx->u.b.out, 0, sizeof(struct obstcp_half_connection));
 
-  ECRYPT_keysetup(ctx->u.b.in.input, in_key, 256, 0);
-  ECRYPT_keysetup(ctx->u.b.out.input, out_key, 256, 0);
+  memcpy(ctx->u.b.in.key, in_key, 32);
+  memcpy(ctx->u.b.out.key, out_key, 32);
 
   ctx->u.b.in.used = 64;
   ctx->u.b.out.used = 64;
@@ -809,8 +825,8 @@ obstcp_client_ctx_init(struct obstcp_client_ctx *ctx, struct obstcp_keys *keys,
 
   memset(ctx, 0, sizeof(struct obstcp_client_ctx));
 
-  ECRYPT_keysetup(ctx->in.input, in_key, 256, 0);
-  ECRYPT_keysetup(ctx->out.input, out_key, 256, 0);
+  memcpy(ctx->in.key, in_key, 32);
+  memcpy(ctx->out.key, out_key, 32);
 
   ctx->in.used = 64;
   ctx->out.used = 64;

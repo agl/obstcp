@@ -226,7 +226,8 @@ extern void PUBLIC obstcp_advert_cname_encode(char *output,
 struct obstcp_half_connection {
   uint8_t  keystream[64];  // keystream bytes
   unsigned used;  // number of bytes of @keystream used
-  uint32_t input[16];  // salsa20 context
+  uint8_t key[32];        // salsa20/8 context
+  uint8_t block_ctr[16];  // salsa20/8 context
 };
 
 // -----------------------------------------------------------------------------
