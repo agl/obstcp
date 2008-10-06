@@ -1,0 +1,10 @@
+***** NOTE *****
+
+Due to the way that the build process works, some compilers errors
+are expected as we try to build different platform specific code
+to find one that works.
+
+Just because you see errors, it doesn't mean that the build failed.
+Additionally, libevent development headers are needed to build
+some of the optional utilities, but the core works fine without.
+

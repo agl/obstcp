@@ -1,7 +1,12 @@
 CFLAGS=-ggdb -fPIC -Wall -fvisibility=hidden
-TARGETS=libobstcp.a libobstcp.so.1 obstcp-serv obstcp-cli obstcp-redir obstcp-keygen
+TARGETS=.warning libobstcp.a libobstcp.so.1 obstcp-serv obstcp-cli obstcp-redir obstcp-keygen
 
 targets: $(TARGETS)
+
+.warning:
+	cat build-note
+	sleep 7
+	touch .warning
 
 install: libobstcp.so.1 libobstcp.h
 	cp libobstcp.h /usr/include
