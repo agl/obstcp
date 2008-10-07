@@ -66,9 +66,9 @@ endText = do
     fill
 
   pushTransMatrix $ do
-    ex <- C.textExtents "Music by Triad (CC-by-sa)"
+    ex <- C.textExtents "Music by Etherfysh (CC-by-nc-sa)"
     translate (0-(textExtentsWidth ex / 2)) (0.2)
-    C.showText "Music by Triad (CC-by-sa)"
+    C.showText "Music by Etherfysh (CC-by-nc-sa)"
     fill
 
 
@@ -209,7 +209,7 @@ video = [ (0, startFade)
         , (33, single $ centerWord "<section>")
         , (34, single $ blackBackground)
         , (35.8, single $ centerWord "SSL/TLS")
-        , (47.8, single $ blackBackground)
+        , (37.8, single $ blackBackground)
         , (44.25, single $ centerWord "www.google.com")
         , (45, single $ blackBackground)
         , (52.9, single $ centerWord "1.")
