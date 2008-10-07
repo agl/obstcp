@@ -46,6 +46,8 @@ server() {
   read(urfd, secret, sizeof(secret));
 
   struct obstcp_keys keys;
+
+  obstcp_keys_init(&keys);
   if (!obstcp_keys_key_add(&keys, secret)) {
     perror("key_add");
     return 1;
