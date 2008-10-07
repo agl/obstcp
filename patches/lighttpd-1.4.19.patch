@@ -1,3 +1,16 @@
+diff --git a/src/Makefile.am b/src/Makefile.am
+index a112789..108d8dc 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -47,7 +47,7 @@ common_src=buffer.c log.c \
+       http-header-glue.c \
+       network_write.c network_linux_sendfile.c \
+       network_freebsd_sendfile.c network_writev.c \
+-      network_solaris_sendfilev.c network_openssl.c \
++      network_solaris_sendfilev.c network_openssl.c network_obstcp.c \
+       splaytree.c status_counter.c
+ 
+ src = server.c response.c connections.c network.c \
 diff --git a/config.h.in b/config.h.in
 index 33347ba..45a2ed4 100644
 --- a/config.h.in
@@ -30,19 +43,6 @@ index 2dcebac..8b481e9 100644
  dnl Check for openssl
  AC_MSG_CHECKING(for OpenSSL)
  AC_ARG_WITH(openssl,
-diff --git a/src/Makefile.am b/src/Makefile.am
-index a112789..108d8dc 100644
---- a/src/Makefile.am
-+++ b/src/Makefile.am
-@@ -47,7 +47,7 @@ common_src=buffer.c log.c \
-       http-header-glue.c \
-       network_write.c network_linux_sendfile.c \
-       network_freebsd_sendfile.c network_writev.c \
--      network_solaris_sendfilev.c network_openssl.c \
-+      network_solaris_sendfilev.c network_openssl.c network_obstcp.c \
-       splaytree.c status_counter.c
- 
- src = server.c response.c connections.c network.c \
 diff --git a/src/base.h b/src/base.h
 index acaf533..0577125 100644
 --- a/src/base.h
@@ -413,3 +413,124 @@ index 3cb36af..879aa98 100644
 +#endif
 +
  #endif
+diff --git a/src/network_obstcp.c b/src/network_obstcp.c
+new file mode 100644
+index 0000000..e421489
+--- /dev/null
++++ b/src/network_obstcp.c
+@@ -0,0 +1,115 @@
++#include "network_backends.h"
++
++#ifdef USE_OBSTCP
++
++#include <unistd.h>
++#include <fcntl.h>
++#include <linux/sockios.h>
++#include <sys/uio.h>
++#include <assert.h>
++#include <errno.h>
++#include <stdio.h>
++
++#include "network.h"
++#include "fdevent.h"
++#include "log.h"
++#include "stat_cache.h"
++
++#include <libobstcp.h>
++
++#define LOCAL_SEND_BUFSIZE (64 * 1024)
++
++int network_write_chunkqueue_obstcp(server *srv, connection *con, chunkqueue *cq) {
++	chunk *c;
++	static const unsigned kNumIOV = 8;
++	struct iovec iniov[kNumIOV], outiov[kNumIOV];
++	unsigned j = 0;  // indexes @iniov
++	unsigned numout = kNumIOV;
++
++	for(c = cq->first; c && j < kNumIOV; c = c->next) {
++		if (c->type == UNUSED_CHUNK) continue;
++		if (c->type == FILE_CHUNK) break;
++
++		iniov[j].iov_base = c->mem->ptr + c->offset;
++		iniov[j++].iov_len = c->mem->used - 1 - c->offset;
++	}
++
++	if (j) {
++		ssize_t r;
++
++		obstcp_accum_prepare(&con->obsaccum, outiov, &numout, iniov, j);
++
++		do {
++			r = writev(con->fd, outiov, numout);
++		} while (r == -1 && errno == EINTR);
++
++		if (r < 0) {
++			if (errno == EAGAIN) return 0;
++			return -2;
++		} else if (r == 0) {
++			return -2;
++		} else {
++			ssize_t bytes_done = obstcp_accum_commit(&con->obsaccum, r);
++
++			for(c = cq->first; c && bytes_done; c = c->next) {
++				if (c->type == UNUSED_CHUNK) continue;
++
++				const size_t todo = c->mem->used - 1 - c->offset;
++				ssize_t done = bytes_done;
++				if (done > todo) done = todo;
++				c->offset += done;
++				bytes_done -= done;
++			}
++		}
++
++		return 1;
++	} else {
++		// We don't have any memory chunks to enqueue. Either c is
++		// pointing to a file chunk or we don't have any data at all.
++		if (!c) return 0;
++
++		stat_cache_entry *sce = NULL;
++		int ifd;
++
++		off_t offset = c->file.start + c->offset;
++		off_t toSend = c->file.length - c->offset;
++		buffer *newbuffer;
++
++		if (toSend > LOCAL_SEND_BUFSIZE) toSend = LOCAL_SEND_BUFSIZE;
++
++		if (HANDLER_ERROR == stat_cache_get_entry(srv, con, c->file.name, &sce)) {
++			log_error_write(srv, __FILE__, __LINE__, "sb",
++					strerror(errno), c->file.name);
++			return -1;
++		}
++
++		if (-1 == (ifd = open(c->file.name->ptr, O_RDONLY))) {
++			log_error_write(srv, __FILE__, __LINE__, "ss", "open failed:", strerror(errno));
++
++			return -1;
++		}
++
++		if (offset) lseek(ifd, offset, SEEK_SET);
++
++		newbuffer = buffer_init();
++		buffer_prepare_copy(newbuffer, toSend + 1);
++
++		if (-1 == (toSend = read(ifd, newbuffer->ptr, toSend))) {
++			close(ifd);
++			buffer_free(newbuffer);
++			log_error_write(srv, __FILE__, __LINE__, "ss", "read failed:", strerror(errno));
++			return -1;
++		}
++		close(ifd);
++
++		newbuffer->ptr[toSend] = 0;
++		newbuffer->used = toSend + 1;
++
++		c->offset += toSend;
++		chunkqueue_prepend_buffer(cq, newbuffer);
++
++		return network_write_chunkqueue_obstcp(srv, con, cq);
++	}
++}
++
++#endif
