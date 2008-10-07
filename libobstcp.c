@@ -427,8 +427,8 @@ encrypt(struct obstcp_half_connection *hc, uint8_t *out,
       salsa208(hc->keystream, hc->block_ctr, hc->key, sigma);
       block_ctr_inc(hc->block_ctr);
       xor(out + j, in + j, hc->keystream, 64);
-      l -= chunks << 6;
-      j += chunks << 6;
+      l -= 64;
+      j += 64;
     }
   }
   if (l) {
@@ -1189,6 +1189,11 @@ obstcp_rbuf_read(struct obstcp_rbuf *rbuf, uint8_t *buffer, size_t len,
   if (remaining < n) {
     // Not all of @buffer was consumed
     varbuf_copy_in(&rbuf->in, rbuffer + remaining, n - remaining);
+  }
+
+  if (!j) {
+    errno = EAGAIN;
+    return -1;
   }
 
   return j;
