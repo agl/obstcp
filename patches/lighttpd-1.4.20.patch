@@ -1,0 +1,520 @@
+Index: configure.in
+===================================================================
+--- configure.in	(revision 2313)
++++ configure.in	(working copy)
+@@ -200,6 +200,13 @@
+  AC_CHECK_HEADERS([valgrind/valgrind.h])
+ fi
+ 
++# Obfuscated TCP
++AC_CHECK_LIB(obstcp, obstcp_server_ctx_init, [
++  AC_CHECK_HEADERS([libobstcp.h],[
++    AC_DEFINE([HAVE_OBSTCP], [1],[libobstcp]),
++    LDFLAGS="$LDFLAGS -lobstcp"
++  ])])
++
+ dnl Check for openssl
+ AC_MSG_CHECKING(for OpenSSL)
+ AC_ARG_WITH(openssl,
+Index: src/base.h
+===================================================================
+--- src/base.h	(revision 2313)
++++ src/base.h	(working copy)
+@@ -33,6 +33,11 @@
+ # include <openssl/ssl.h>
+ #endif
+ 
++#if defined HAVE_OBSTCP
++#define USE_OBSTCP
++#include <libobstcp.h>
++#endif
++
+ #ifdef HAVE_FAM_H
+ # include <fam.h>
+ #endif
+@@ -268,8 +273,13 @@
+ 	buffer *ssl_cipher_list;
+ 	unsigned short ssl_use_sslv2;
+ 
++	// server wide
++	buffer *obs_privatekey_file;
++	buffer *obs_advert;
++
+ 	unsigned short use_ipv6;
+ 	unsigned short is_ssl;
++	unsigned short is_obs;
+ 	unsigned short allow_http11;
+ 	unsigned short etag_use_inode;
+ 	unsigned short etag_use_mtime;
+@@ -417,6 +427,13 @@
+ 	SSL *ssl;
+ 	buffer *ssl_error_want_reuse_buffer;
+ #endif
++
++#ifdef USE_OBSTCP
++	struct obstcp_server_ctx obsctx;
++	struct obstcp_accum obsaccum;
++	struct obstcp_rbuf obsrbuf;
++#endif
++
+ 	/* etag handling */
+ 	etag_flags_t etag_flags;
+ 
+@@ -510,12 +527,17 @@
+ 	unsigned short ssl_use_sslv2;
+ 	unsigned short use_ipv6;
+ 	unsigned short is_ssl;
++	unsigned short is_obs;
+ 
+ 	buffer *srv_token;
+ 
+ #ifdef USE_OPENSSL
+ 	SSL_CTX *ssl_ctx;
+ #endif
++#ifdef USE_OBSTCP
++	struct obstcp_keys obs_keys;
++#endif
++
+        unsigned short is_proxy_ssl;
+ } server_socket;
+ 
+@@ -624,6 +646,9 @@
+ 	int (* network_ssl_backend_write)(struct server *srv, connection *con, SSL *ssl, chunkqueue *cq);
+ 	int (* network_ssl_backend_read)(struct server *srv, connection *con, SSL *ssl, chunkqueue *cq);
+ #endif
++#ifdef USE_OBSTCP
++	int (* network_obstcp_backend_write)(struct server *srv, connection *con, chunkqueue *cq);
++#endif
+ 
+ 	uid_t uid;
+ 	gid_t gid;
+Index: src/connections.c
+===================================================================
+--- src/connections.c	(revision 2313)
++++ src/connections.c	(working copy)
+@@ -316,13 +316,42 @@
+ #endif
+ }
+ 
++static int connection_handle_read_obs(server *srv, connection *con) {
++	uint8_t temp[8193];
++
++	ssize_t n = obstcp_rbuf_read_fd(&con->obsrbuf, con->fd, temp, sizeof(temp) - 1);
++	if (n < 0) {
++		if (errno == EAGAIN) {
++			con->is_readable = 0;
++			return 0;
++		}
++		fprintf(stderr, "obs read failed %s\n", strerror(errno));
++		connection_set_state(srv, con, CON_STATE_ERROR);
++		return -1;
++	} else if (n == 0) {
++		con->is_readable = 0;
++		/* the other end close the connection -> KEEP-ALIVE */
++		return -2;
++	} else {
++		temp[n] = 0;
++		chunkqueue_append_mem(con->read_queue, temp, n + 1);
++		con->bytes_read += n;
++		return 0;
++	}
++}
++
++
+ static int connection_handle_read(server *srv, connection *con) {
+ 	int len;
+ 	buffer *b;
+ 	int toread;
+ 
++	fprintf(stderr, "handle read: %d\n", con->conf.is_obs);
++
+ 	if (con->conf.is_ssl) {
+ 		return connection_handle_read_ssl(srv, con);
++	} else if (con->conf.is_obs) {
++		return connection_handle_read_obs(srv, con);
+ 	}
+ 
+ #if defined(__WIN32)
+@@ -577,6 +606,12 @@
+ 			}
+ 		}
+ 	}
++	
++	if (!con->conf.is_obs && !buffer_is_empty(con->conf.obs_advert)) {
++		response_header_overwrite(srv, con, CONST_STR_LEN("X-ObsTCP-Advert"),
++								con->conf.obs_advert->ptr,
++								con->conf.obs_advert->used);
++	}
+ 
+ 	if (con->request.http_method == HTTP_METHOD_HEAD) {
+ 		/**
+@@ -847,6 +882,10 @@
+ 	}
+ #endif
+ 
++#ifdef USE_OBSTCP
++	obstcp_rbuf_free(&con->obsrbuf);
++#endif
++
+ 	con->header_len = 0;
+ 	con->in_error_handler = 0;
+ 
+@@ -1347,6 +1386,15 @@
+ 			}
+ 		}
+ #endif
++
++#ifdef USE_OBSTCP
++		if (srv_socket->is_obs) {
++			obstcp_server_ctx_init(&con->obsctx, &srv_socket->obs_keys);
++			obstcp_server_accum_init(&con->obsaccum, &con->obsctx);
++			obstcp_rbuf_server_init(&con->obsrbuf, &con->obsctx);
++			con->conf.is_obs = 1;
++		}
++#endif
+ 		return con;
+ 	}
+ }
+@@ -1354,7 +1402,7 @@
+ 
+ int connection_state_machine(server *srv, connection *con) {
+ 	int done = 0, r;
+-#ifdef USE_OPENSSL
++#if defined USE_OPENSSL || defined USE_OBSTCP
+ 	server_socket *srv_sock = con->srv_socket;
+ #endif
+ 
+@@ -1389,7 +1437,9 @@
+ #ifdef USE_OPENSSL
+ 			con->conf.is_ssl = srv_sock->is_ssl;
+ #endif
+-
++#ifdef USE_OBSTCP
++			con->conf.is_obs = srv_sock->is_obs;
++#endif
+ 			break;
+ 		case CON_STATE_REQUEST_END: /* transient */
+ 			if (srv->srvconf.log_state_handling) {
+Index: src/network.c
+===================================================================
+--- src/network.c	(revision 2313)
++++ src/network.c	(working copy)
+@@ -396,6 +396,55 @@
+ 
+ 		return -1;
+ #endif
++	} else if (s->is_obs) {
++#ifdef USE_OBSTCP
++		/* Load the private key into the keyset */
++		struct stat st;
++		unsigned char buffer[32];
++
++		const int fd = open(s->obs_privatekey_file->ptr, O_RDONLY);
++		if (fd < 0) {
++			log_error_write(srv, __FILE__, __LINE__, "ss", "OBS:",
++					"Failed to open private key file");
++			return -1;
++		}
++		if (fstat(fd, &st)) {
++			log_error_write(srv, __FILE__, __LINE__, "ss", "OBS:",
++					"Failed to stat private key file");
++			close(fd);
++			return -1;
++		}
++		if (st.st_size != 32) {
++			log_error_write(srv, __FILE__, __LINE__, "ss", "OBS:",
++					"Private key not 32 bytes long");
++			close(fd);
++			return -1;
++		}
++
++		ssize_t n;
++		do {
++			n = read(fd, buffer, sizeof(buffer));
++		} while (n == -1 && errno == EINTR);
++		close(fd);
++
++		if (n != sizeof(buffer)) {
++			log_error_write(srv, __FILE__, __LINE__, "ss", "OBS:",
++					"Failed to read from private key file");
++			return -1;
++		}
++
++		obstcp_keys_init(&srv_socket->obs_keys);
++		if (!obstcp_keys_key_add(&srv_socket->obs_keys, buffer)) {
++			log_error_write(srv, __FILE__, __LINE__, "ss", "OBS:",
++					"Failed to add key to keyset");
++			return -1;
++		}
++#else
++		log_error_write(srv, __FILE__, __LINE__, "ss", "OBS:",
++				"ObsTCP requested but libobstcp support is not compiled in");
++
++		return -1;
++#endif
+ 	} else {
+ #ifdef SO_ACCEPTFILTER
+ 		/*
+@@ -413,6 +462,7 @@
+ 	}
+ 
+ 	srv_socket->is_ssl = s->is_ssl;
++	srv_socket->is_obs = s->is_obs;
+ 	srv_socket->fde_ndx = -1;
+ 
+ 	if (srv->srv_sockets.size == 0) {
+@@ -505,6 +555,9 @@
+ #ifdef USE_OPENSSL
+ 	srv->network_ssl_backend_write = network_write_chunkqueue_openssl;
+ #endif
++#ifdef USE_OBSTCP
++	srv->network_obstcp_backend_write = network_write_chunkqueue_obstcp;
++#endif
+ 
+ 	/* get a usefull default */
+ 	backend = network_backends[0].nb;
+@@ -639,6 +692,10 @@
+ #ifdef USE_OPENSSL
+ 		ret = srv->network_ssl_backend_write(srv, con, con->ssl, cq);
+ #endif
++	} else if (srv_socket->is_obs) {
++#ifdef USE_OBSTCP
++		ret = srv->network_obstcp_backend_write(srv, con, cq);
++#endif
+ 	} else {
+ 		ret = srv->network_backend_write(srv, con, con->fd, cq);
+ 	}
+Index: src/configfile.c
+===================================================================
+--- src/configfile.c	(revision 2313)
++++ src/configfile.c	(working copy)
+@@ -94,6 +94,10 @@
+ 		{ "etag.use-inode",             NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_SERVER }, /* 49 */
+ 		{ "etag.use-mtime",             NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_SERVER }, /* 50 */
+ 		{ "etag.use-size",             NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_SERVER }, /* 51 */
++		{ "obstcp.privatekey-file",      NULL, T_CONFIG_STRING, T_CONFIG_SCOPE_SERVER },      /* 52 */
++		{ "obstcp.advert",               NULL, T_CONFIG_STRING, T_CONFIG_SCOPE_SERVER },      /* 53 */
++		{ "obstcp.engine",               NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_SERVER },     /* 54 */
++
+ 		{ "server.host",                 "use server.bind instead", T_CONFIG_DEPRECATED, T_CONFIG_SCOPE_UNSET },
+ 		{ "server.docroot",              "use server.document-root instead", T_CONFIG_DEPRECATED, T_CONFIG_SCOPE_UNSET },
+ 		{ "server.virtual-root",         "load mod_simple_vhost and use simple-vhost.server-root instead", T_CONFIG_DEPRECATED, T_CONFIG_SCOPE_UNSET },
+@@ -151,6 +155,8 @@
+ 		s->ssl_ca_file   = buffer_init();
+ 		s->error_handler = buffer_init();
+ 		s->server_tag    = buffer_init();
++		s->obs_privatekey_file = buffer_init();
++		s->obs_advert    = buffer_init();
+ 		s->ssl_cipher_list = buffer_init();
+ 		s->errorfile_prefix = buffer_init();
+ 		s->max_keep_alive_requests = 16;
+@@ -159,6 +165,7 @@
+ 		s->max_write_idle = 360;
+ 		s->use_xattr     = 0;
+ 		s->is_ssl        = 0;
++		s->is_obs        = 0;
+ 		s->ssl_use_sslv2 = 1;
+ 		s->use_ipv6      = 0;
+ #ifdef HAVE_LSTAT
+@@ -217,7 +224,11 @@
+ 		cv[49].destination = &(s->etag_use_inode);
+ 		cv[50].destination = &(s->etag_use_mtime);
+ 		cv[51].destination = &(s->etag_use_size);
++		cv[52].destination = s->obs_privatekey_file;
++		cv[53].destination = s->obs_advert;
++		cv[54].destination = &(s->is_obs);
+ 
++
+ 		srv->config_storage[i] = s;
+ 
+ 		if (0 != (ret = config_insert_values_global(srv, ((data_config *)srv->config_context->data[i])->value, cv))) {
+@@ -295,6 +306,11 @@
+ 	PATCH(etag_use_inode);
+ 	PATCH(etag_use_mtime);
+ 	PATCH(etag_use_size);
++
++	PATCH(is_obs);
++	PATCH(obs_privatekey_file);
++	PATCH(obs_advert);
++
+  
+ 	return 0;
+ }
+@@ -352,6 +368,12 @@
+ 				PATCH(ssl_cipher_list);
+ 			} else if (buffer_is_equal_string(du->key, CONST_STR_LEN("ssl.engine"))) {
+ 				PATCH(is_ssl);
++			} else if (buffer_is_equal_string(du->key, CONST_STR_LEN("obstcp.privatekey-file"))) {
++				PATCH(obs_privatekey_file);
++			} else if (buffer_is_equal_string(du->key, CONST_STR_LEN("obstcp.advert"))) {
++				PATCH(obs_advert);
++			} else if (buffer_is_equal_string(du->key, CONST_STR_LEN("obstcp.engine"))) {
++				PATCH(is_obs);
+ #ifdef HAVE_LSTAT
+ 			} else if (buffer_is_equal_string(du->key, CONST_STR_LEN("server.follow-symlink"))) {
+ 				PATCH(follow_symlink);
+@@ -1272,6 +1294,18 @@
+ 		return -1;
+ #endif
+ 	}
++	if (s->is_obs) {
++		if (buffer_is_empty(s->obs_privatekey_file)) {
++			log_error_write(srv, __FILE__, __LINE__, "s",
++							"obstcp.privatekey-file must be set");
++			return -1;
++		}
++#ifndef USE_OBSTCP
++		log_error_write(srv, __FILE__, __LINE__, "s",
++						"Obfuscated TCP support is missing. Install libobstcp and recompile");
++		return -1;
++#endif
++	}
+ 
+ 	return 0;
+ }
+Index: src/network_backends.h
+===================================================================
+--- src/network_backends.h	(revision 2313)
++++ src/network_backends.h	(working copy)
+@@ -55,4 +55,8 @@
+ int network_write_chunkqueue_openssl(server *srv, connection *con, SSL *ssl, chunkqueue *cq);
+ #endif
+ 
++#ifdef USE_OBSTCP
++int network_write_chunkqueue_obstcp(server *srv, connection *con, chunkqueue *cq);
+ #endif
++
++#endif
+Index: src/network_obstcp.c
+===================================================================
+--- src/network_obstcp.c	(revision 0)
++++ src/network_obstcp.c	(revision 0)
+@@ -0,0 +1,115 @@
++#include "network_backends.h"
++
++#ifdef USE_OBSTCP
++
++#include <unistd.h>
++#include <fcntl.h>
++#include <linux/sockios.h>
++#include <sys/uio.h>
++#include <assert.h>
++#include <errno.h>
++#include <stdio.h>
++
++#include "network.h"
++#include "fdevent.h"
++#include "log.h"
++#include "stat_cache.h"
++
++#include <libobstcp.h>
++
++#define LOCAL_SEND_BUFSIZE (64 * 1024)
++
++int network_write_chunkqueue_obstcp(server *srv, connection *con, chunkqueue *cq) {
++	chunk *c;
++	static const unsigned kNumIOV = 8;
++	struct iovec iniov[kNumIOV], outiov[kNumIOV];
++	unsigned j = 0;  // indexes @iniov
++	unsigned numout = kNumIOV;
++
++	for(c = cq->first; c && j < kNumIOV; c = c->next) {
++		if (c->type == UNUSED_CHUNK) continue;
++		if (c->type == FILE_CHUNK) break;
++
++		iniov[j].iov_base = c->mem->ptr + c->offset;
++		iniov[j++].iov_len = c->mem->used - 1 - c->offset;
++	}
++
++	if (j) {
++		ssize_t r;
++
++		obstcp_accum_prepare(&con->obsaccum, outiov, &numout, iniov, j);
++
++		do {
++			r = writev(con->fd, outiov, numout);
++		} while (r == -1 && errno == EINTR);
++
++		if (r < 0) {
++			if (errno == EAGAIN) return 0;
++			return -2;
++		} else if (r == 0) {
++			return -2;
++		} else {
++			ssize_t bytes_done = obstcp_accum_commit(&con->obsaccum, r);
++
++			for(c = cq->first; c && bytes_done; c = c->next) {
++				if (c->type == UNUSED_CHUNK) continue;
++
++				const size_t todo = c->mem->used - 1 - c->offset;
++				ssize_t done = bytes_done;
++				if (done > todo) done = todo;
++				c->offset += done;
++				bytes_done -= done;
++		}
++		}
++
++		return 1;
++	} else {
++		// We don't have any memory chunks to enqueue. Either c is
++		// pointing to a file chunk or we don't have any data at all.
++		if (!c) return 0;
++
++		stat_cache_entry *sce = NULL;
++		int ifd;
++
++		off_t offset = c->file.start + c->offset;
++		off_t toSend = c->file.length - c->offset;
++		buffer *newbuffer;
++
++		if (toSend > LOCAL_SEND_BUFSIZE) toSend = LOCAL_SEND_BUFSIZE;
++
++		if (HANDLER_ERROR == stat_cache_get_entry(srv, con, c->file.name, &sce)) {
++			log_error_write(srv, __FILE__, __LINE__, "sb",
++					strerror(errno), c->file.name);
++			return -1;
++		}
++
++		if (-1 == (ifd = open(c->file.name->ptr, O_RDONLY))) {
++			log_error_write(srv, __FILE__, __LINE__, "ss", "open failed:", strerror(errno));
++
++			return -1;
++		}
++
++		if (offset) lseek(ifd, offset, SEEK_SET);
++
++		newbuffer = buffer_init();
++		buffer_prepare_copy(newbuffer, toSend + 1);
++
++		if (-1 == (toSend = read(ifd, newbuffer->ptr, toSend))) {
++			close(ifd);
++			buffer_free(newbuffer);
++			log_error_write(srv, __FILE__, __LINE__, "ss", "read failed:", strerror(errno));
++			return -1;
++		}
++		close(ifd);
++
++		newbuffer->ptr[toSend] = 0;
++		newbuffer->used = toSend + 1;
++
++		c->offset += toSend;
++		chunkqueue_prepend_buffer(cq, newbuffer);
++
++		return network_write_chunkqueue_obstcp(srv, con, cq);
++	}
++}
++
++#endif
+Index: src/Makefile.am
+===================================================================
+--- src/Makefile.am	(revision 2313)
++++ src/Makefile.am	(working copy)
+@@ -52,7 +52,7 @@
+       http-header-glue.c \
+       network_write.c network_linux_sendfile.c \
+       network_freebsd_sendfile.c network_writev.c \
+-      network_solaris_sendfilev.c network_openssl.c \
++      network_solaris_sendfilev.c network_openssl.c network_obstcp.c \
+       splaytree.c status_counter.c
+ 
+ src = server.c response.c connections.c network.c \
