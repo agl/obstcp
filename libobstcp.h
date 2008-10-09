@@ -13,6 +13,12 @@ extern "C" {
 
 #define PUBLIC __attribute__((visibility("default")))
 
+// Some systems (like OS X) don't define ENOKEY, so we copy the value from
+// Linux here.
+#ifndef ENOKEY
+#define ENOKEY 126
+#endif
+
 // Maximum frame prefix size
 #define OBSTCP_MAX_PREFIX 64
 // Maximum number of payload bytes in a frame
