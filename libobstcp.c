@@ -410,7 +410,7 @@ block_ctr_inc(uint8_t *ctr) {
 static const uint8_t sigma[16] = "expand 32-byte k";
 
 static void
-encrypt(struct obstcp_half_connection *hc, uint8_t *out,
+obs_encrypt(struct obstcp_half_connection *hc, uint8_t *out,
         const uint8_t *in, size_t len) {
   size_t l = len, j = 0, i;
 
@@ -672,7 +672,7 @@ obstcp_server_read(struct obstcp_server_ctx *ctx,
 
   unsigned i;
   for (i = 0; i < out.i; ++i) {
-    encrypt(&ctx->u.b.in, outiov[i].iov_base, outiov[i].iov_base, outiov[i].iov_len);
+    obs_encrypt(&ctx->u.b.in, outiov[i].iov_base, outiov[i].iov_base, outiov[i].iov_len);
     *consumed += outiov[i].iov_len;
   }
 
@@ -687,7 +687,7 @@ obstcp_server_ready(const struct obstcp_server_ctx *ctx) {
 ssize_t EXPORTED
 obstcp_server_encrypt(struct obstcp_server_ctx *ctx, uint8_t *output,
                       const uint8_t *buffer, size_t len) {
-  encrypt(&ctx->u.b.out, output, buffer, len);
+  obs_encrypt(&ctx->u.b.out, output, buffer, len);
   if (!ctx->frame_valid && ctx->state == SRV_ST_2ND_FRAME_PENDING) {
     ctx->state = SRV_ST_RUNNING;
   }
@@ -904,7 +904,7 @@ obstcp_client_read(struct obstcp_client_ctx *ctx,
 
   unsigned i;
   for (i = 0; i < out.i; ++i) {
-    encrypt(&ctx->in, outiov[i].iov_base, outiov[i].iov_base, outiov[i].iov_len);
+    obs_encrypt(&ctx->in, outiov[i].iov_base, outiov[i].iov_base, outiov[i].iov_len);
     *consumed += outiov[i].iov_len;
   }
 
@@ -914,7 +914,7 @@ obstcp_client_read(struct obstcp_client_ctx *ctx,
 ssize_t EXPORTED
 obstcp_client_encrypt(struct obstcp_client_ctx *ctx, uint8_t *output,
                       const uint8_t *buffer, size_t len) {
-  encrypt(&ctx->out, output, buffer, len);
+  obs_encrypt(&ctx->out, output, buffer, len);
 
   return len;
 }
