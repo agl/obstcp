@@ -1,5 +1,5 @@
 diff --git a/netwerk/base/src/nsSocketTransport2.cpp b/netwerk/base/src/nsSocketTransport2.cpp
-index e81a367..a27250d 100644
+index e81a367..d70ed5a 100644
 --- a/netwerk/base/src/nsSocketTransport2.cpp
 +++ b/netwerk/base/src/nsSocketTransport2.cpp
 @@ -48,6 +48,8 @@
@@ -255,15 +255,16 @@ index e81a367..a27250d 100644
              PRErrorCode code = PR_GetError();
              if (code == PR_WOULD_BLOCK_ERROR)
                  return NS_BASE_STREAM_WOULD_BLOCK;
-@@ -712,6 +858,7 @@ nsSocketTransport::nsSocketTransport()
+@@ -712,6 +858,8 @@ nsSocketTransport::nsSocketTransport()
      , mInputClosed(PR_TRUE)
      , mOutputClosed(PR_TRUE)
      , mResolving(PR_FALSE)
 +    , mObfuscation(0)
++    , mTLSTransport(0)
      , mLock(PR_NewLock())
      , mFD(nsnull)
      , mFDref(0)
-@@ -730,6 +877,8 @@ nsSocketTransport::nsSocketTransport()
+@@ -730,6 +878,8 @@ nsSocketTransport::nsSocketTransport()
  nsSocketTransport::~nsSocketTransport()
  {
      LOG(("destroying nsSocketTransport @%x\n", this));
@@ -272,7 +273,7 @@ index e81a367..a27250d 100644
  
      // cleanup socket type info
      if (mTypes) {
-@@ -741,7 +890,7 @@ nsSocketTransport::~nsSocketTransport()
+@@ -741,7 +891,7 @@ nsSocketTransport::~nsSocketTransport()
  
      if (mLock)
          PR_DestroyLock(mLock);
@@ -281,24 +282,77 @@ index e81a367..a27250d 100644
      nsSocketTransportService *serv = gSocketTransportService;
      NS_RELEASE(serv); // nulls argument
  }
-@@ -1155,11 +1304,44 @@ nsSocketTransport::InitiateSocket()
-     // 
-     // Initiate the connect() to the host...  
-     //
+@@ -968,9 +1118,42 @@ nsSocketTransport::BuildSocket(PRFileDesc *&fd, PRBool &proxyTransparent, PRBool
+     proxyTransparent = PR_FALSE;
+     usingSSL = PR_FALSE;
+ 
++    fprintf(stderr, "BuildSocket: mTypeCount:%d\n", mTypeCount);
+     if (mTypeCount == 0) {
+-        fd = PR_OpenTCPSocket(mNetAddr.raw.family);
+-        rv = fd ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
++        if (mTLSTransport && mProxyHost.IsEmpty()) {
++            fprintf(stderr, "Building TLS socket to: %u\n", mPort);
++
++            nsCOMPtr<nsISocketProviderService> spserv =
++                do_GetService(kSocketProviderServiceCID, &rv);
++            if (NS_FAILED(rv)) return rv;
++
++            nsCOMPtr<nsISocketProvider> provider;
++            rv = spserv->GetSocketProvider("ssl", getter_AddRefs(provider));
++            if (NS_FAILED(rv))
++                return rv;
++
++            nsCOMPtr<nsISupports> secinfo;
++            rv = provider->NewSocket(mNetAddr.raw.family,
++                                     mHost.get(), mPort, nsnull, 0, 0,
++                                     &fd, getter_AddRefs(secinfo));
++
++            if (NS_SUCCEEDED(rv) && !fd) {
++                NS_NOTREACHED("NewSocket succeeded but failed to create a PRFileDesc");
++                return NS_ERROR_UNEXPECTED;
++            }
++
++            nsCOMPtr<nsISSLSocketControl> secCtrl(do_QueryInterface(secinfo));
++            if (!secCtrl) {
++                NS_NOTREACHED("Failed to get secCtrl");
++                return NS_ERROR_UNEXPECTED;
++            }
++            secCtrl->SetIgnoreAllCertErrors(true);
++
++            return NS_OK;
++        } else {
++          fd = PR_OpenTCPSocket(mNetAddr.raw.family);
++          rv = fd ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
++        }
+     }
+     else {
+         fd = nsnull;
+@@ -1027,6 +1210,7 @@ nsSocketTransport::BuildSocket(PRFileDesc *&fd, PRBool &proxyTransparent, PRBool
+ 
+             // if the service was ssl or starttls, we want to hold onto the socket info
+             PRBool isSSL = (strcmp(mTypes[i], "ssl") == 0);
++            fprintf(stderr, "isSSL: %d\n", isSSL);
+             if (isSSL || (strcmp(mTypes[i], "starttls") == 0)) {
+                 // remember security info and give notification callbacks to PSM...
+                 nsCOMPtr<nsIInterfaceRequestor> callbacks;
+@@ -1100,6 +1284,39 @@ nsSocketTransport::InitiateSocket()
+         return rv;
+     }
+ 
 +    struct obstcp_keys *const keys = ns_obstcp_get_keys();
 +
 +    if (mProxyPort == 0 && strlen(mHost.get()) && mPort == 80 && mDNSRecord) {
 +        nsCString advert;
 +        nsresult r = mDNSRecord->GetAdvert(advert);
 +        if (NS_SUCCEEDED(r)) {
-+            int newport;
++            int newport, tlsport;
 +
-+            if (obstcp_advert_base32_parse
-+                (advert.get(), advert.Length(),
-+                 OBSTCP_ADVERT_OBSPORT, &newport,
-+                 OBSTCP_ADVERT_END) &&
-+                newport) {
-+
++            int a = obstcp_advert_base32_parse
++                      (advert.get(), advert.Length(),
++                       OBSTCP_ADVERT_OBSPORT, &newport,
++                       OBSTCP_ADVERT_TLSPORT, &tlsport,
++                       OBSTCP_ADVERT_END);
++            if (a && newport) {
 +                mNetAddr.inet.port = htons(newport);
 +                mObfuscation = 1;
 +                PRUint8 random[16];
@@ -309,12 +363,27 @@ index e81a367..a27250d 100644
 +                }
 +                obstcp_client_accum_init(&mObsAccum, &mObsContext);
 +                obstcp_rbuf_client_init(&mObsRBuf, &mObsContext);
++            } else if (a && tlsport) {
++              fprintf(stderr, "Using TLS alternative transport");
++              mTLSTransport = 1;
++              mPort = tlsport;
++              mNetAddr.inet.port = htons(tlsport);
 +            }
 +        }
 +    }
 +
-     status = PR_Connect(fd, &mNetAddr, NS_SOCKET_CONNECT_TIMEOUT);
-     if (status == PR_SUCCESS) {
+     //
+     // create new socket fd, push io layers, etc.
+     //
+@@ -1108,6 +1325,7 @@ nsSocketTransport::InitiateSocket()
+     PRBool usingSSL;
+ 
+     rv = BuildSocket(fd, proxyTransparent, usingSSL);
++    fprintf(stderr, "BuildSocket usingSSL:%d\n", usingSSL);
+     if (NS_FAILED(rv)) {
+         LOG(("  BuildSocket failed [rv=%x]\n", rv));
+         return rv;
+@@ -1160,6 +1378,12 @@ nsSocketTransport::InitiateSocket()
          // 
          // we are connected!
          //
@@ -323,10 +392,11 @@ index e81a367..a27250d 100644
 +            obstcp_client_banner(&mObsContext, &iov);
 +            PR_Write(fd, iov.iov_base, iov.iov_len);
 +        }
++
          OnSocketConnected();
      }
      else {
-@@ -1179,6 +1361,11 @@ nsSocketTransport::InitiateSocket()
+@@ -1179,6 +1403,11 @@ nsSocketTransport::InitiateSocket()
              //
              // we are connected!
              //
@@ -338,7 +408,7 @@ index e81a367..a27250d 100644
              OnSocketConnected();
  
              if (mSecInfo && !mProxyHost.IsEmpty() && proxyTransparent && usingSSL) {
-@@ -1408,6 +1595,9 @@ nsSocketTransport::OnSocketEvent(PRUint32 type, nsresult status, nsISupports *pa
+@@ -1408,6 +1637,9 @@ nsSocketTransport::OnSocketEvent(PRUint32 type, nsresult status, nsISupports *pa
          if (param) {
              mDNSRecord = static_cast<nsIDNSRecord *>(param);
              mDNSRecord->GetNextAddr(SocketPort(), &mNetAddr);
@@ -348,7 +418,7 @@ index e81a367..a27250d 100644
          }
          // status contains DNS lookup status
          if (NS_FAILED(status)) {
-@@ -1506,6 +1696,11 @@ nsSocketTransport::OnSocketReady(PRFileDesc *fd, PRInt16 outFlags)
+@@ -1506,6 +1738,11 @@ nsSocketTransport::OnSocketReady(PRFileDesc *fd, PRInt16 outFlags)
              //
              // we are connected!
              //
@@ -361,7 +431,7 @@ index e81a367..a27250d 100644
          }
          else {
 diff --git a/netwerk/base/src/nsSocketTransport2.h b/netwerk/base/src/nsSocketTransport2.h
-index de4133f..3b2c177 100644
+index de4133f..9abf5d1 100644
 --- a/netwerk/base/src/nsSocketTransport2.h
 +++ b/netwerk/base/src/nsSocketTransport2.h
 @@ -56,6 +56,8 @@
@@ -391,11 +461,12 @@ index de4133f..3b2c177 100644
  };
  
  //-----------------------------------------------------------------------------
-@@ -224,6 +230,10 @@ private:
+@@ -224,6 +230,11 @@ private:
      nsCOMPtr<nsICancelable> mDNSRequest;
      nsCOMPtr<nsIDNSRecord>  mDNSRecord;
      PRNetAddr               mNetAddr;
 +    bool                    mObfuscation;
++    bool                    mTLSTransport;
 +    struct obstcp_client_ctx mObsContext;
 +    struct obstcp_rbuf      mObsRBuf;
 +    struct obstcp_accum     mObsAccum;
@@ -796,6 +867,79 @@ index 366ef00..fb6e76f 100644
  
      PR_STATIC_CALLBACK(void) ThreadFunc(void *);
  
+diff --git a/netwerk/socket/base/nsISSLSocketControl.idl b/netwerk/socket/base/nsISSLSocketControl.idl
+index 3fede66..343aa7b 100644
+--- a/netwerk/socket/base/nsISSLSocketControl.idl
++++ b/netwerk/socket/base/nsISSLSocketControl.idl
+@@ -45,6 +45,7 @@ interface nsIInterfaceRequestor;
+ [scriptable, uuid(a092097c-8386-4f1b-97b1-90eb70008c2d)]
+ interface nsISSLSocketControl : nsISupports {
+     attribute nsIInterfaceRequestor     notificationCallbacks;
++    attribute boolean ignoreAllCertErrors;
+ 
+     void proxyStartSSL();
+     void StartTLS();
+diff --git a/security/manager/ssl/src/nsNSSIOLayer.cpp b/security/manager/ssl/src/nsNSSIOLayer.cpp
+index d7cc583..55e20c1 100644
+--- a/security/manager/ssl/src/nsNSSIOLayer.cpp
++++ b/security/manager/ssl/src/nsNSSIOLayer.cpp
+@@ -201,7 +201,8 @@ PRBool nsSSLSocketThreadData::ensure_buffer_size(PRInt32 amount)
+ }
+ 
+ nsNSSSocketInfo::nsNSSSocketInfo()
+-  : mFd(nsnull),
++  : mIgnoreAllCertErrors(0),
++    mFd(nsnull),
+     mBlockingState(blocking_state_unknown),
+     mSecurityState(nsIWebProgressListener::STATE_IS_INSECURE),
+     mSubRequestsHighSecurity(0),
+@@ -331,6 +332,20 @@ nsNSSSocketInfo::SetNotificationCallbacks(nsIInterfaceRequestor* aCallbacks)
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP
++nsNSSSocketInfo::GetIgnoreAllCertErrors(PRBool *val) {
++  *val = mIgnoreAllCertErrors;
++  fprintf(stderr, "Getting IgnoreAllCertErrors: %d\n", mIgnoreAllCertErrors);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsNSSSocketInfo::SetIgnoreAllCertErrors(PRBool val) {
++  mIgnoreAllCertErrors = val;
++  fprintf(stderr, "Setting IgnoreAllCertErrors: %d\n", val);
++  return NS_OK;
++}
++
+ nsresult
+ nsNSSSocketInfo::EnsureDocShellDependentStuffKnown()
+ {
+@@ -2843,6 +2858,13 @@ nsNSSBadCertHandler(void *arg, PRFileDesc *sslSocket)
+   if (nsSSLThread::exitRequested())
+     return cancel_and_failure(infoObject);
+ 
++  fprintf(stderr, "Starting cert error processing\n");
++  PRBool ignore_errors;
++  if (NS_SUCCEEDED(infoObject->GetIgnoreAllCertErrors(&ignore_errors)) &&
++      ignore_errors)
++    return SECSuccess;
++  fprintf(stderr, "  ... continuing\n");
++
+   CERTCertificate *peerCert = nsnull;
+   CERTCertificateCleaner peerCertCleaner(peerCert);
+   peerCert = SSL_PeerCertificate(sslSocket);
+diff --git a/security/manager/ssl/src/nsNSSIOLayer.h b/security/manager/ssl/src/nsNSSIOLayer.h
+index b530d98..ff5f18b 100644
+--- a/security/manager/ssl/src/nsNSSIOLayer.h
++++ b/security/manager/ssl/src/nsNSSIOLayer.h
+@@ -199,6 +199,7 @@ public:
+   
+ protected:
+   nsCOMPtr<nsIInterfaceRequestor> mCallbacks;
++  PRBool mIgnoreAllCertErrors;
+   PRFileDesc* mFd;
+   nsCOMPtr<nsIX509Cert> mCert;
+   nsCOMPtr<nsIX509Cert> mPreviousCert; // DocShellDependent
 diff --git a/toolkit/library/Makefile.in b/toolkit/library/Makefile.in
 index 7b00f11..d30494c 100644
 --- a/toolkit/library/Makefile.in
