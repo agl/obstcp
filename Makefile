@@ -18,6 +18,8 @@ install: libobstcp.so.1 libobstcp.h
 
 clean:
 	rm -f *.o *.a *.pp $(TARGETS)
+	rm -f curve25519/*/*.o
+	rm -f curve25519/*/a.out
 
 obstcp-redir: libobstcp.a obstcp-redir.c
 	gcc $(CFLAGS) -o obstcp-redir obstcp-redir.c libobstcp.a curve25519.a -levent
