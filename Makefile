@@ -1,5 +1,5 @@
 CFLAGS=-ggdb -fPIC -Wall -fvisibility=hidden
-TARGETS=.warning libobstcp.a libobstcp.so.1 obstcp-serv obstcp-cli obstcp-redir obstcp-keygen
+TARGETS=.warning libobstcp.a libobstcp.so.1 obstcp-serv obstcp-cli obstcp-redir obstcp-keygen obstcp-tlsadvert
 
 targets: $(TARGETS)
 
@@ -32,6 +32,9 @@ obstcp-cli: libobstcp.a obstcp-cli.c
 
 obstcp-keygen: obstcp-keygen.c libobstcp.a
 	gcc $(CFLAGS) -o obstcp-keygen obstcp-keygen.c libobstcp.a curve25519.a
+
+obstcp-tlsadvert: obstcp-tlsadvert.c libobstcp.a
+	gcc $(CFLAGS) -o obstcp-tlsadvert obstcp-tlsadvert.c libobstcp.a curve25519.a
 
 libobstcp.so.1: libobstcp.o salsa208.o sha256.o base32.o curve25519.a cursor.h varbuf.h iovec_cursor.h
 	gcc -o libobstcp.so.1 -shared -Wl,-soname -Wl,libobstcp.so.1 -ldl libobstcp.o salsa208.o sha256.o base32.o curve25519.a
