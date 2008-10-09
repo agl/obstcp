@@ -9,10 +9,12 @@ targets: $(TARGETS)
 	touch .warning
 
 install: libobstcp.so.1 libobstcp.h
-	cp libobstcp.h /usr/include
-	cp libobstcp.so.1 /usr/lib
-	ln -sf /usr/lib/libobstcp.so.1 /usr/lib/libobstcp.so
-	ldconfig
+	mkdir -p $(DESTDIR)/usr/include
+	cp libobstcp.h $(DESTDIR)/usr/include
+	mkdir -p $(DESTDIR)/usr/lib
+	cp libobstcp.so.1 $(DESTDIR)/usr/lib
+	ln -sf /usr/lib/libobstcp.so.1 $(DESTDIR)/usr/lib/libobstcp.so
+	ldconfig || true # ok to fail if we are non-root and writing to temporary DESTDIR
 
 clean:
 	rm -f *.o *.a *.pp $(TARGETS)
