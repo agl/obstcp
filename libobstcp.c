@@ -90,14 +90,16 @@ advert_create(uint8_t *output, unsigned length,
   uint8_t advert[384];
   unsigned j = 0;
 
-  if (!keys->keys) {
+  if (keys && !keys->keys) {
     errno = ENOKEY;
     return -1;
   }
 
-  if (!varint_put(advert, sizeof(advert), &j, OBSTCP_KIND_PUBLIC << 1 | 1)) goto spc;
-  if (!varint_put(advert, sizeof(advert), &j, 32)) goto spc;
-  if (!buffer_put(advert, sizeof(advert), &j, keys->keys->public_key, 32)) goto spc;
+  if (keys) {
+    if (!varint_put(advert, sizeof(advert), &j, OBSTCP_KIND_PUBLIC << 1 | 1)) goto spc;
+    if (!varint_put(advert, sizeof(advert), &j, 32)) goto spc;
+    if (!buffer_put(advert, sizeof(advert), &j, keys->keys->public_key, 32)) goto spc;
+  }
 
   for (;;) {
     const int type = va_arg(ap, int);
