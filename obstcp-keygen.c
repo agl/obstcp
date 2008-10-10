@@ -10,6 +10,25 @@
 
 #include "libobstcp.h"
 
+static char
+reada(int fd, void *buffer, size_t count) {
+  size_t done = 0;
+
+  while (count) {
+    ssize_t n;
+    do {
+      n = read(fd, ((uint8_t *) buffer) + done, count);
+    } while (n == -1 && errno == EINTR);
+
+    if (n < 1)
+      return 0;
+    done += n;
+    count -= n;
+  }
+
+  return 1;
+}
+
 static int
 usage(const char *argv0) {
   fprintf(stderr, "Usage: %s <ObsTCP port number> > /dir/private-key\n", argv0);
@@ -43,7 +62,10 @@ main(int argc, char **argv) {
 
     portnum = p;
   } else {
-    read(urfd, &portnum, 2);
+    if (!reada(urfd, &portnum, 2)) {
+      perror("Error reading from /dev/random");
+      return 1;
+    }
     portnum &= 0x3fff;
     portnum += 1024;
   }
@@ -54,12 +76,7 @@ main(int argc, char **argv) {
   uint8_t private_key[32];
 
   fprintf(stderr, "Generating random data...\n");
-  ssize_t n;
-  do {
-    n = read(urfd, private_key, sizeof(private_key));
-  } while (n == -1 && errno == EINTR);
-
-  if (n != sizeof(private_key)) {
+  if (!reada(urfd, private_key, sizeof(private_key))) {
     perror("Error reading from /dev/random");
     return 1;
   }
