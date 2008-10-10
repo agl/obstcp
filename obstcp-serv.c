@@ -90,6 +90,8 @@ server() {
     uint8_t b;
     const ssize_t n = obstcp_rbuf_read_fd(&rbuf, nfd, &b, 1);
     if (n < 0) {
+      if (errno == EAGAIN)
+        continue;
       perror("obstcp_rbuf_read_fd");
       return 1;
     } else if (n == 0) {
@@ -165,6 +167,8 @@ server() {
         fprintf(stderr, "  ** Remote closed\n");
         return 0;
       } else if (n < 0) {
+        if (errno == EAGAIN)
+          continue;
         perror("obstcp_rbuf_read_fd");
         return 1;
       } else {
