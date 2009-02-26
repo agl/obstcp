@@ -12,9 +12,10 @@ San Francisco, California\\
 \begin{abstract}
 Many of the core Internet protocols were designed for a less hostile network
 than the average packet finds itself in today. Many hosts are connecting over
-shared-key or open wireless networks where evesdropping is trivial. ISPs are
-experimenting with institutional sniffing where the clickstreams of the
-majority of users are observed and sold for their marketing value.
+shared-key or open wireless networks where evesdropping is trivial. On a larger
+scale, ISPs are experimenting with institutional sniffing where the
+clickstreams of the majority of users are observed and sold for their marketing
+value.
 
 Like the shift away from RSH and open mail relays, it's our belief that all
 traffic should now be encrypted. As a practical matter this means
@@ -30,19 +31,20 @@ for this. Unencrypted protocols are easier to debug, easier to experiment with
 and computationally cheaper. Additionally, sniffing on networks has previously
 been the exception, not the rule.
 
-The computational cost of cryptography has been reduced in two ways.
-As ever, processors become faster and cheaper on the one hand. On the other,
-cryptography and research into cryptographic implementations has advanced. On
-an Intel Core2, AES-128 can encrypt at 12 cycles/byte\cite{aesspeed} and
-elliptic-curve key agreement can be performed within 250
-$\mu$s\cite{curve25519}. Polynomial message-authenticators can be as cheap as a
-couple of cycles/byte on a Pentium 4\cite{umac}.
+In recent years, the computational cost of cryptography has been reduced in two
+ways.  As ever, processors become faster and cheaper on the one hand. On the
+other, cryptography and research into cryptographic implementations has
+advanced. On an Intel Core2, one can perform AES-128 encryption at 12
+cycles/byte\cite{aesspeed} and an elliptic-curve key agreement can be performed
+within 400K cycles\cite{curve25519}. Polynomial message-authenticators can be as
+cheap as a couple of cycles/byte on a Pentium 4\cite{umac}.
 
-As some of the costs have diminished, the motivations have increased. Companies
-such as Phorm and Nebu-Ad have announced and trialed schemes where web-traffic
-is sniffed or intercepted at an ISP level to extract information about users.
-As economic times get tougher, the incentive for ISPs and other network
-operators to engage in such dubious practices will only increase.
+As some of the costs of encryption have diminished, the motivations have
+increased. Companies such as Phorm and Nebu-Ad have announced and trialed
+schemes where web-traffic is sniffed or intercepted at an ISP level to extract
+information about users.  As economic times get tougher, the incentive for ISPs
+and other network operators to engage in such dubious practices will only
+increase.
 
 On the small scale, the methods by which end hosts are connected are becoming
 increasingly wireless. These wireless networks are inherently more open to
@@ -56,15 +58,15 @@ operators, legally or otherwise.
 \section{Opportunistic Encryption}
 
 Another hindrance to the mass deployment of encryption has been the problem of
-trust. Although key-agreement protocols can setup a secure channel between two
-end-points, additional information is need to verify that the other end is who
-they claim to be.
+trust. Although key-agreement protocols can establish a secure channel between
+two end-points, additional information is need to verify that the other end is
+who they claim to be.
 
 TLS solves this problem using a public-key infrastructure where central
-authorities are trusted to make the link between real-world and cryptographic identities.
-SSH has achieved wide-ranging success using imprinting,
-where cryptographic identities are assumed to be correct on first sight and
-remembered for future transactions.
+authorities are trusted to link real-world and cryptographic identities. SSH
+has achieved wide-ranging success using imprinting, where cryptographic
+identities are assumed to be correct on first sight and remembered for future
+transactions.
 
 Opportunistic encryption is the act of setting up a secure channel without
 verifying the identity of the other host (or, at best, imprinting may be used).
@@ -74,22 +76,23 @@ endpoints that he is the other.
 
 Because of this, opportunistic encryption is insufficient when the secrets
 being protected are of high value. However, it can operate without human
-action or knowledge which appears to be critical for any design which aspires
-to large scale deployment: despite the near total support of HTTPS, and low
-cost of certificates, adoption has been sadly limited.
+action or knowledge and this appears to be critical for any design which
+aspires to large scale deployment. Despite near ubiqutous support for HTTPS, and
+low cost certificates, adoption has been sadly limited.
 
 Perhaps most critically, opportunistic encryption provides a method for
 detecting large-scale sniffing. Currently, sniffing can occur silently and none
 of the users need ever be aware that it's happening. A sufficiently
 powerful attacker could perform man-in-the-middle attacks on all connections at
-an ISP level. However, any connections where certificates are validated would
+an ISP level. However, any connections where identities are validated would
 detect the subterfuge.
 
-A small set of nodes, distributed across different networks, performing
+Thus, a small set of nodes, distributed across different networks, performing
 validated connections between each other at regular intervals could serve as
 canaries for any network machinations. As long as the attacker can not
-differentiate opportunistic connections from secure ones at the point where the
-attack has to be performed, a large-scale attack would inevitably be detected.
+differentiate opportunistic connections from validated ones at the point where
+the attack has to be performed, a large-scale attack would inevitably be
+detected.
 
 \section{Design Space}
 
@@ -119,15 +122,16 @@ opportunistic encryption at the network layer. The reasons for this failure are
 myriad, but include the complexity of the solution and the additional latencies
 introduced. The work is being carried on by OpenSWAN, StrongSWAN and the IETF
 Better Than Nothing Security working group\cite{btns}. We wish them the best of
-luck, but consider the failure of FreeS/WAN to be instructive since we have
-nothing to substance to add to their designs.
+luck, but consider the failure of FreeS/WAN to be a warning since we have
+nothing of substance to add to their designs.
 
 \subsection{TCP}
 
 If we are aiming for all traffic to be opportunistically encrypted, then adding
-the capability to TCP would seem to be ideal. By working at this low level, all
-higher protocols would automatically gain the benefits without having to alter
-the thousands of user-land programs which implement them.
+the capability to TCP would seem to be almost as ideal as IPSec. By working at
+this low level, all higher protocols would automatically gain the benefits
+without having to alter the thousands of user-land programs which implement
+them.
 
 Providing an upgrade path is easily done by using the TCP options mechanism to
 advertise support.
@@ -142,7 +146,7 @@ of some complexity. We relegate the details to Appendix A for those who are
 curious.
 
 Most significantly, changes at this layer are difficult to achieve. The
-addition of TCP options requires the agreement of the IETF TCPM working group.
+addition of TCP options requires the agreement of the IETF.
 More troubling is that important TCP stacks are closed source and it may take
 many years to affect a change in them\footnote{It took eight years between the
 publication of RFC 1323 and the implementation of TCP timestamps in Windows
@@ -157,7 +161,7 @@ argument.
 
 \subsection{Transport Layer}
 
-If we decide to work above the kernel, at the transport layer, then we have to
+If we decide to work above the kernel, at such a transport layer, then we have to
 solve the advertising issue to provide an upgrade path and decide what the
 transport layer protocol should look like.
 
@@ -185,9 +189,9 @@ cryptographic primitives: elliptic curve Diffie-Hellman, reduced round ciphers
 etc. (TLS {\it could} use all of these. However, modifying TLS and its
 implementations negates some of the advantages of its ubiquity.)
 
-In support of TLS, it is already universally supported with solid
+In favour of TLS, it is already universally supported with solid
 implementations. Every serious web server includes well tested TLS support. TLS
-does have a reputation of being slow. However, this is usually the result of
+does have a reputation of being slow, however this is usually the result of
 conservative default configurations. Using OpenSSL with no special
 configuration, connecting to {\tt mail.google.com} (which is expertly
 configured) results in a ciphersuite of {\tt RC4-SHA}. Connecting to
@@ -203,7 +207,7 @@ configuration would go a very long way.
 
 If we decide not to work in the TCP stack, we have to provide some way for
 clients to know when a given server supports our transport layer modifications.
-At this point, we have to start dealing with the specifics of application-level
+At this point we have to start dealing with the specifics of application-level
 protocols and, for simplicities sake, we will only consider HTTP. If an
 opportunistic encryption
 scheme ever managed reasonably wide deployment with HTTP, we would consider it
@@ -298,15 +302,15 @@ using imprinting and TLS. We have initial implementations for Firefox and
 Chromium at this time.
 
 Although several details still need to be resolved, at this time the rough
-outline of the scheme is this: Upon connecting to a HTTP server for the first
+outline of the scheme is this: Upon connecting to an HTTP server for the first
 time, the browser requests the path {\tt /\_\_tls\_desiderata}. If present,
 this JSON\cite{rfc4627} document contains information about the server's support for
 opportunistic encryption, the fingerprint of the certficate and the duration of
 time that this information should be cached for. If the server believes that it
 is capable of opportunistic connections, the client immediately verifies this.
 
-For future connections to such a host, the HTTP stack connects using the
-standard HTTPS port (443) and skips the usual certificate verification.
+For future connections to such a host, the HTTP stack connects using TLS on the
+standard HTTPS port (443) and skips certificate verification.
 
 This design emphisies ease of deployment above all else. It requires changes to
 web browsers, however open source browsers now account for over 20\% of
@@ -326,7 +330,7 @@ HTTPS. In this case, the HTTP stack fabricates an HTTP redirect for these hosts
 which directs the browser to use HTTPS (with the according UI decorations).
 This helps solve the issue which arises when users type just the domain name of
 a site. Since web browsers default to HTTP in this case, users are vulnerable
-as demonstrated with the SSLStrip tool\cite{sslstrip}.
+as recently demonstrated with the SSLStrip tool\cite{sslstrip}.
 
 \section{UI Considerations}
 
@@ -358,7 +362,7 @@ speed up breaking more instances. With a petabyte of storage, you could break
 112-bit curves in $2^{12}$ operations, which is a real-time attack.
 
 So, if we concede that we need larger public values we have to employ space
-outside of the transitional TCP options space. There is an IETF draft to this
+outside of the traditional TCP options space. There is an IETF draft to this
 effect\cite{tcploo}, however it greatly complicates matters since the client's public
 value can no longer be carried in the SYN frame. Instead, we are forced to
 invent the concept of deferred options which are carried in the client's second
