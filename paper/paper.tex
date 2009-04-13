@@ -12,7 +12,7 @@ San Francisco, California\\
 \begin{abstract}
 Many of the core Internet protocols were designed for a less hostile network
 than the average packet finds itself in today. Many hosts are connecting over
-shared-key or open wireless networks where evesdropping is trivial. On a larger
+shared-key or open wireless networks where eavesdropping is trivial. On a larger
 scale, ISPs are experimenting with institutional sniffing where the
 clickstreams of the majority of users are observed and sold for their marketing
 value.
@@ -77,15 +77,15 @@ endpoints that he is the other.
 Because of this, opportunistic encryption is insufficient when the secrets
 being protected are of high value. However, it can operate without human
 action or knowledge and this appears to be critical for any design which
-aspires to large scale deployment. Despite near ubiqutous support for HTTPS, and
-low cost certificates, adoption has been sadly limited.
+aspires to large scale deployment. Despite near ubiquitous support for HTTPS,
+and the low cost of certificates, adoption has been sadly limited.
 
 Perhaps most critically, opportunistic encryption provides a method for
 detecting large-scale sniffing. Currently, sniffing can occur silently and none
-of the users need ever be aware that it's happening. A sufficiently
-powerful attacker could perform man-in-the-middle attacks on all connections at
-an ISP level. However, any connections where identities are validated would
-detect the subterfuge.
+of the users need ever be aware that it's happening. In the face of widespread
+opportunistic encryption, a sufficiently powerful attacker could perform
+man-in-the-middle attacks on all connections at an ISP level. However, any
+connections where identities are validated would detect the subterfuge.
 
 Thus, a small set of nodes, distributed across different networks, performing
 validated connections between each other at regular intervals could serve as
@@ -98,7 +98,7 @@ detected.
 
 If the goal of opportunistically encrypting traffic is accepted, there are
 still many details to decide upon. In general, the details break into three
-axis:
+parts:
 
 \begin{itemize}
 \item The cryptographic protocol and primitives to use.
@@ -119,10 +119,10 @@ We will first consider where in the stack we should work.
 The FreeS/WAN project\cite{freeswan} attempted, and
 failed\cite{freeswanfailure}, to implement
 opportunistic encryption at the network layer. The reasons for this failure are
-myriad, but include the complexity of the solution and the additional latencies
+myriad and include the complexity of the solution and the additional latencies
 introduced. The work is being carried on by OpenSWAN, StrongSWAN and the IETF
 Better Than Nothing Security working group\cite{btns}. We wish them the best of
-luck, but consider the failure of FreeS/WAN to be a warning since we have
+luck, but consider the failure of FreeS/WAN to be a warning because we have
 nothing of substance to add to their designs.
 
 \subsection{TCP}
@@ -130,25 +130,24 @@ nothing of substance to add to their designs.
 If we are aiming for all traffic to be opportunistically encrypted, then adding
 the capability to TCP would seem to be almost as ideal as IPSec. By working at
 this low level, all higher protocols would automatically gain the benefits
-without having to alter the thousands of user-land programs which implement
+without having to alter the thousands of user-land programs that implement
 them.
 
-Providing an upgrade path is easily done by using the TCP options mechanism to
+Providing an upgrade path is easily done using the TCP options mechanism to
 advertise support.
 
-Also, by working at the TCP layer, we could also protect the TCP metadata
+Also, by working at the TCP layer, we could protect the TCP metadata
 itself. This would render harmless simple RST injection attacks\cite{comcast}
 and other such TCP manipulations.
 
-However, there are significant technical difficulties with altering TCP to
-implement worthwhile opportunistic encryption. We can overcome them at the cost
-of some complexity. We relegate the details to Appendix A for those who are
-curious.
+There are significant technical difficulties with altering TCP to implement
+worthwhile opportunistic encryption, although we can overcome them at the cost
+of some complexity. The details can be found in Appendix A.
 
 Most significantly, changes at this layer are difficult to achieve. The
 addition of TCP options requires the agreement of the IETF.
 More troubling is that important TCP stacks are closed source and it may take
-many years to affect a change in them\footnote{It took eight years between the
+many years to effect a change in them\footnote{It took eight years between the
 publication of RFC 1323 and the implementation of TCP timestamps in Windows
 2000. It took several more years before Windows 2000 and later kernels came to
 account for a significant fraction of running Windows systems.}.
@@ -161,38 +160,36 @@ argument.
 
 \subsection{Transport Layer}
 
-If we decide to work above the kernel, at such a transport layer, then we have to
+If we decide to work at the transport layer, above the kernel, we must
 solve the advertising issue to provide an upgrade path and decide what the
 transport layer protocol should look like.
 
-When it comes to transport layer cryptography there are two basic options: use
+There are two basic options for transport layer cryptography: use
 TLS or roll our own. Many of the caveats about designing one's own transport
-layer protocol are rendered moot when considering a protocol which is not
-designed to be secure against man-in-the-middle attacks. By rolling our own
-protocol we can gain one significant advantage over TLS: no additional round
-trips if we can obtain the server's Diffie-Hellman public value via some
-side-channel.
+layer protocol are rendered moot when considering a protocol that is not
+designed to be secure against man-in-the-middle attacks.
 
-TLS requires two additional round trips to establish a connection. (This falls
-to one for connections where the client has cached state from a previous
-connection.) By rolling our own protocol, we can reduce this to zero.
+TLS requires two additional round trips to establish a connection. (This is
+reduced to one for connections where the client has cached state from a
+previous connection.) By rolling our own protocol we can gain one significant
+advantage over TLS: no additional round trips when we obtain the server's
+Diffie-Hellman public value via some side-channel.
 
 The costs of additional latency have not been well researched, publicly.
-Instead we have to rely on anecdotes like the following
-
-  ``In A/B tests (at Amazon.com), we tried delaying the page in increments of
-  100 milliseconds and found that even very small delays would result in
-  substantial and costly drops in revenue.''\cite{latency}
+Instead we have to rely on anecdotes like the following: ``In A/B tests (at
+Amazon.com), we tried delaying the page in increments of 100 milliseconds and
+found that even very small delays would result in substantial and costly drops
+in revenue.''\cite{latency}
 
 By rolling our own transport layer protocol we could also use faster
 cryptographic primitives: elliptic curve Diffie-Hellman, reduced round ciphers
 etc. (TLS {\it could} use all of these. However, modifying TLS and its
 implementations negates some of the advantages of its ubiquity.)
 
-In favour of TLS, it is already universally supported with solid
-implementations. Every serious web server includes well tested TLS support. TLS
-does have a reputation of being slow, however this is usually the result of
-conservative default configurations. Using OpenSSL with no special
+An argument favour of TLS is that it is already universally supported with
+solid implementations. Every serious web server includes well tested TLS
+support. TLS does have a reputation of being slow but this is usually the
+result of conservative default configurations. When using OpenSSL with no special
 configuration, connecting to {\tt mail.google.com} (which is expertly
 configured) results in a ciphersuite of {\tt RC4-SHA}. Connecting to
 a default Apache installation uses the dramatically slower {\tt
@@ -203,15 +200,14 @@ unnecessary for HTTPS. It's our opinion that the costs of
 TLS are greatly exaggerated in the minds of many administrators and a little
 configuration would go a very long way.
 
-\section{Advertising Support}
+\section{Providing an Upgrade Path}
 
 If we decide not to work in the TCP stack, we have to provide some way for
 clients to know when a given server supports our transport layer modifications.
 At this point we have to start dealing with the specifics of application-level
-protocols and, for simplicities sake, we will only consider HTTP. If an
-opportunistic encryption
-scheme ever managed reasonably wide deployment with HTTP, we would consider it
-a stunning success.
+protocols, and for simplicity, we only consider HTTP. If an opportunistic
+encryption scheme ever managed reasonably wide deployment with HTTP, we would
+consider it a stunning success.
 
 Such an advert needs to provide confirmation that a given server supports
 opportunistic encryption. It may provide an alternative port number for
@@ -232,30 +228,30 @@ typically returned in the Additional section of the reply\cite{rfc1035} and is
 available via the standard {\tt gethostbyname} API call.
 
 This neat trick has a major limitation in that it doesn't work when using a
-name without a {\tt www} (etc) at the beginning as such a name cannot be a
+name without a {\tt www} (etc) at the beginning because such a name cannot be a
 CNAME.
 
-Using other record types is certainly possible, however DNS packets cannot
+Using other record types is certainly possible but DNS packets cannot
 carry more than one request\footnote{DNS packets can have more than a single
-request in them. However, due to an apparent oversight there's no way for the
+request in them. However, due to an apparent oversight, there's no way for the
 server to signal the status of the different requests and so, to our knowledge,
-every DNS server returns {\tt SERVFAIL} in this case.} so accessing the extra
+every DNS server returns {\tt SERVFAIL} in this case.}, so accessing the extra
 records means additional DNS requests. The requests for the non-standard
 records will also have much lower cache hit rates. If the HTTP client doesn't
 wait for the reply to this additional request before making the connection,
-then we loose the ability to act on the first connection. If it does wait, then
+then we lose the ability to act on the first connection. If it does wait, then
 we introduce additional latency for all websites, regardless of their support
 for opportunistic encryption.
 
 Non-standard record types are also more difficult to resolve using standard
-APIs, difficult to configure with some types of DNS registrars and require human
+APIs, difficult to configure with some DNS registrars, and require human
 intervention to setup.
 
 \subsection{HTTP Based Imprinting}
 
-Since we are only considering HTTP at this point. Let us imagine that there's a
-distinguished path, which HTTP clients can request from a given server, that
-contains information about the server's support for opportunistic encryption
+Since we are only considering HTTP at this point, let us imagine that there's a
+distinguished path that HTTP clients can request from a given server,
+containing information about the server's support for opportunistic encryption
 schemes (like {\tt /favicon.ico} for icons). The client then remembers this
 information for future connections to the same server.
 
@@ -281,56 +277,54 @@ over-optimistic claim of support.
 
 \section{Related work}
 
-We have already mentioned FreeS/WAN\cite{freeswan} and it's progeny, OpenSWAN,
+We have already mentioned FreeS/WAN\cite{freeswan} and its progeny, OpenSWAN,
 StrongSWAN and BTNS\cite{btns}, all of which add opportunistic encryption to
 IPSec.
 
 One notable success for opportunistic encryption has been {\tt STARTTLS}
 support in SMTP\cite{rfc3207}. Since SMTP already had a standard method for
 advertising additional server capabilities, organic deployment of {\tt
-STARTTLS} support has ment that opportunistically encrypted hop-to-hop mail
-transport will eventually be the norm.
+STARTTLS} support has meant that opportunistically encrypted hop-to-hop
+transport will eventually be the norm for e-mail.
 
 \section{Conclusions}
 
 In order to gain understanding of the issues involved, we have built working
-prototypes of all the possibilies outlined above.
+prototypes of all the possibilities outlined above.
 
 In light of that work, we currently believe that the most minimal solution
 stands the best chance of success. That would be an HTTP specific solution,
 using imprinting and TLS. We have initial implementations for Firefox and
 Chromium at this time.
 
-Although several details still need to be resolved, at this time the rough
+Although several details still need to be resolved, the rough
 outline of the scheme is this: Upon connecting to an HTTP server for the first
-time, the browser requests the path {\tt /\_\_tls\_desiderata}. If present,
-this JSON\cite{rfc4627} document contains information about the server's support for
-opportunistic encryption, the fingerprint of the certficate and the duration of
-time that this information should be cached for. If the server believes that it
+time, the browser requests the path {\tt /host-meta}. If present,
+this document\cite{hostmeta} contains information about the server's support for
+opportunistic encryption, the fingerprint of the certificate and the duration of
+time that this information should be cached. If the server believes that it
 is capable of opportunistic connections, the client immediately verifies this.
 
 For future connections to such a host, the HTTP stack connects using TLS on the
 standard HTTPS port (443) and skips certificate verification.
 
-This design emphisies ease of deployment above all else. It requires changes to
-web browsers, however open source browsers now account for over 20\% of
-users\cite{netapp}. Implementation on the server side is as simple as adding a file to
-the server's document root and setting up a self-signed certificate. It's also
-possible that opportunistic encryption could be configured by default for new
-web server installs.
+This design emphasises ease of deployment above all else. It requires changes to
+web browsers; however, open source browsers now account for over 20\% of
+users\cite{netapp}. Implementation on the server side is as simple as adding a
+file to the server's document root and setting up a self-signed certificate.
+Opportunistic encryption can also be configured by default for new web server
+installs.
 
-The negatives to this design are that it is specific to HTTP traffic only, it
+The problems with this design are that it is specific to HTTP traffic only, it
 adds additional latency, it doesn't account for the first connection to a given
-host and that TLS is not as optimal a protocol as is possible for opportunistic
-encryption.
+host, and TLS is not an optimised protocol for opportunistic encryption.
 
 As an aside, in the TLS desiderata we also allow a server with a
 certificate-authority signed certificate to elect to always be contacted over
 HTTPS. In this case, the HTTP stack fabricates an HTTP redirect for these hosts
-which directs the browser to use HTTPS (with the according UI decorations).
+which directs the browser to use HTTPS (with the concomitant UI decorations).
 This helps solve the issue which arises when users type just the domain name of
-a site. Since web browsers default to HTTP in this case, users are vulnerable
-as recently demonstrated with the SSLStrip tool\cite{sslstrip}.
+a site. Because web browsers default to HTTP in this case, users are vulnerable, as was recently demonstrated with the SSLStrip tool\cite{sslstrip}.
 
 \section{UI Considerations}
 
@@ -338,7 +332,7 @@ There should be no changes to the UI of any client application because of these
 proposals. Because we have discussed HTTPS, we find that people often conflate
 our suggestions with issues of secure UIs and user-interaction.
 Opportunistically encrypted transport is no more pertinent to users than
-gzipping and HTTP clients absolutely must not suggest otherwise in their UIs.
+compression, and HTTP clients must not suggest otherwise in their UIs.
 TLS with PKI is the HTTPS gold-standard and we don't wish to dilute that.
 
 \appendix[Opportunistic Encryption in TCP]
@@ -353,20 +347,21 @@ bytes for the option header we have only 14 bytes (112-bits).
 
 The most space efficient Diffie-Hellman schemes are based on elliptic curves
 (we are discounting groups based on hyper-elliptic curves\cite{edwards} because
-they are still research topics). The best, general algorithm currently known
-for breaking the Diffie-Hellman problem on elliptic curves is Pollard's Rho.
-This has a work function of $\sqrt{n}$, or $2^{56}$ in this case.
+they are still research topics). The best general algorithm currently known
+for solving the Diffie-Hellman problem on elliptic curves is Pollard's Rho.
+  The expected number of operations required is O($\sqrt{n}$), or $\approx 2^{56}$ in
+this case.
 
-Critically, once you have solved a single instance you can precompute tables to
-speed up breaking more instances. With a petabyte of storage, you could break
-112-bit curves in $2^{12}$ operations, which is a real-time attack.
+Most importantly, once you have solved a single instance you can precompute
+tables to speed up breaking more instances. With a petabyte of storage, you
+could break 112-bit curves in $2^{12}$ operations, which is a real-time attack.
 
 So, if we concede that we need larger public values we have to employ space
 outside of the traditional TCP options space. There is an IETF draft to this
-effect\cite{tcploo}, however it greatly complicates matters since the client's public
-value can no longer be carried in the SYN frame. Instead, we are forced to
-invent the concept of deferred options which are carried in the client's second
-frame (and thus must be retransmitted and acknowledged etc).
+effect\cite{tcploo}, but it greatly complicates matters because the client's
+public value can no longer be carried in the SYN frame. Instead, we are forced
+to invent the concept of deferred options which are carried in the client's
+second frame (and thus must be retransmitted and acknowledged etc).
 
 % trigger a \newpage just before the given reference
 % number - used to balance the columns on the last page
