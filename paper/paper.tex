@@ -51,22 +51,32 @@ increasingly wireless. These wireless networks are inherently more open to
 sniffing, especially given the dominance of Wi-Fi networks using weak
 cryptography\cite{wep} with no key or shared keys.
 
-At the largest scale, if reports are to be believed, governments may now be
-performing sniffing at a national level with the cooperation of backbone
-operators, legally or otherwise.
-
-\section{Opportunistic Encryption}
-
-Another hindrance to the mass deployment of encryption has been the problem of
+A major hindrance to the mass deployment of encryption has been the problem of
 trust. Although key-agreement protocols can establish a secure channel between
 two end-points, additional information is need to verify that the other end is
 who they claim to be.
 
-TLS solves this problem using a public-key infrastructure where central
-authorities are trusted to link real-world and cryptographic identities. SSH
-has achieved wide-ranging success using imprinting, where cryptographic
-identities are assumed to be correct on first sight and remembered for future
-transactions.
+TLS\cite{tls} solves this problem using a public-key infrastructure where
+central authorities are trusted to link real-world and cryptographic
+identities. SSH has achieved wide-ranging success using imprinting, where
+cryptographic identities are assumed to be correct on first sight and
+remembered for future transactions.
+
+Despite ubiqutous support for HTTP over TLS (HTTPS), general adoption has been
+limited due to a variety of roadblocks:
+
+Human intervention is required to generate keys, install them on the server and
+submit them to the certificate authority. These authories require a small,
+annual fee and the administrator must remember to renew the certificates in
+a timely manner. This process must be repeated for each domain name which points
+to the server. Also, support for HTTPS virtual hosting\cite{tlssni} is not as
+widespread as HTTPS support itself.
+
+Once the transport layer aspects are working correctly, websites may need work
+to avoid mixed-content warnings and explicit {\tt http} URLs in links which
+would direct the browser to the unsecured version of the site.
+
+\section{Opportunistic Encryption}
 
 Opportunistic encryption is the act of setting up a secure channel without
 verifying the identity of the other host (or, at best, imprinting may be used).
@@ -121,9 +131,17 @@ failed\cite{freeswanfailure}, to implement
 opportunistic encryption at the network layer. The reasons for this failure are
 myriad and include the complexity of the solution and the additional latencies
 introduced. The work is being carried on by OpenSWAN, StrongSWAN and the IETF
-Better Than Nothing Security working group\cite{btns}. We wish them the best of
-luck, but consider the failure of FreeS/WAN to be a warning because we have
-nothing of substance to add to their designs.
+Better Than Nothing Security working group\cite{btns}.
+
+We wish them the best of luck, but consider the failure of FreeS/WAN to be
+instructive. For a solution at the network layer, their various designs are
+largely reasonable. Many of the reasons for their failure (complexity,
+difficultly of working with the variety of networking hardware, latency) are
+endemic to the layer at which they were working.
+
+Because of this, we don't try to solve the problem at the network layer and
+carry with us a renewed conviction that any solution must be transparent and
+painless to the user.
 
 \subsection{TCP}
 
@@ -318,13 +336,6 @@ installs.
 The problems with this design are that it is specific to HTTP traffic only, it
 adds additional latency, it doesn't account for the first connection to a given
 host, and TLS is not an optimised protocol for opportunistic encryption.
-
-As an aside, in the TLS desiderata we also allow a server with a
-certificate-authority signed certificate to elect to always be contacted over
-HTTPS. In this case, the HTTP stack fabricates an HTTP redirect for these hosts
-which directs the browser to use HTTPS (with the concomitant UI decorations).
-This helps solve the issue which arises when users type just the domain name of
-a site. Because web browsers default to HTTP in this case, users are vulnerable, as was recently demonstrated with the SSLStrip tool\cite{sslstrip}.
 
 \section{UI Considerations}
 
